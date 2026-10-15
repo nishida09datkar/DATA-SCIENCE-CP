@@ -1,0 +1,192 @@
+# KPI root-cause analysis: default configuration.
+# Mirrors the model defaults in src/kpi_rca/config.py. Any key left out falls back to
+# that default; unknown keys are rejected. Times are naive UTC.
+
+seed: 42
+
+data:
+  start: 2026-09-01T00:00:00        # a Tuesday
+  days: 21
+  attempts_per_hour: 3500           # mean over the day
+  hourly_profile: [0.55, 0.42, 0.33, 0.28, 0.27, 0.32, 0.45, 0.65, 0.85, 1.00, 1.12, 1.22,
+                   1.30, 1.30, 1.25, 1.22, 1.25, 1.32, 1.42, 1.50, 1.48, 1.35, 1.08, 0.78]
+  weekly_profile: [0.96, 0.95, 0.97, 0.99, 1.03, 1.08, 1.02]   # Mon..Sun
+  daily_traffic_noise: 0.03
+
+  countries: {US: 0.28, DE: 0.18, GB: 0.12, FR: 0.09, IN: 0.11, BR: 0.09, CA: 0.07, JP: 0.06}
+  os: {iOS: 0.36, Android: 0.32, Windows: 0.20, macOS: 0.12}
+  country_os:
+    US: {iOS: 0.45, Android: 0.25, Windows: 0.18, macOS: 0.12}
+    DE: {iOS: 0.42, Android: 0.31, Windows: 0.17, macOS: 0.10}
+    IN: {iOS: 0.10, Android: 0.70, Windows: 0.17, macOS: 0.03}
+    BR: {iOS: 0.18, Android: 0.62, Windows: 0.16, macOS: 0.04}
+    JP: {iOS: 0.55, Android: 0.20, Windows: 0.15, macOS: 0.10}
+  device_given_os:
+    iOS: {mobile: 0.85, tablet: 0.15}
+    Android: {mobile: 0.90, tablet: 0.10}
+    Windows: {desktop: 1.0}
+    macOS: {desktop: 1.0}
+  app_versions: {"5.2.1": 0.15, "5.3.0": 0.35, "5.4.0": 0.50}   # mobile/tablet; desktop is "web"
+  payment_gateways: {Stripe: 0.35, PayPal: 0.22, Adyen: 0.18, Klarna: 0.10, Braintree: 0.15}
+  country_gateways:
+    DE: {Stripe: 0.15, PayPal: 0.55, Adyen: 0.10, Klarna: 0.15, Braintree: 0.05}
+    BR: {Stripe: 0.30, PayPal: 0.15, Adyen: 0.40, Klarna: 0.02, Braintree: 0.13}
+    IN: {Stripe: 0.40, PayPal: 0.10, Adyen: 0.35, Klarna: 0.02, Braintree: 0.13}
+
+  base_conversion: 0.86
+  conversion_effects:               # logit offsets; BR converts worse all the time (normal)
+    country: {US: 0.15, DE: 0.10, GB: 0.10, FR: 0.0, IN: -0.35, BR: -0.75, CA: 0.05, JP: 0.20}
+    os: {iOS: 0.10, Android: -0.05, Windows: 0.0, macOS: 0.10}
+    device_type: {mobile: 0.0, tablet: 0.05, desktop: 0.10}
+    payment_gateway: {Stripe: 0.05, PayPal: 0.10, Adyen: 0.0, Klarna: -0.10, Braintree: 0.0}
+    app_version: {"5.2.1": -0.10, "5.3.0": 0.0, "5.4.0": 0.05, web: 0.0}
+  hourly_conversion_amplitude: 0.05
+
+  amount_log_mean: 4.0
+  amount_log_sigma: 0.6
+  country_amount_scale: {US: 1.0, DE: 0.95, GB: 0.9, FR: 0.9, IN: 0.35, BR: 0.5, CA: 0.95, JP: 1.05}
+  latency_median_ms: 420
+  latency_log_sigma: 0.35
+  gateway_latency_scale: {Stripe: 0.9, PayPal: 1.25, Adyen: 0.95, Klarna: 1.1, Braintree: 1.0}
+  error_mix: {CARD_DECLINED: 0.45, INSUFFICIENT_FUNDS: 0.20, USER_ABANDONED: 0.27, FRAUD_BLOCK: 0.08}
+
+  incidents:
+    - incident_id: INC-001
+      segment: {country: DE, os: iOS, payment_gateway: PayPal}
+      start: 2026-09-10T13:00:00
+      duration_hours: 4
+      failure_rate: 0.88
+      error_code: PAYPAL_SDK_TIMEOUT
+      latency_multiplier: 6.0
+      ticket_rate: 0.04
+      ticket_themes: [paypal_timeout]
+    - incident_id: INC-002
+      segment: {os: Android, app_version: "5.4.0"}
+      start: 2026-09-16T17:00:00
+      duration_hours: 3
+      failure_rate: 0.32
+      error_code: APP_CRASH_ON_PAY
+      latency_multiplier: 1.0
+      ticket_rate: 0.03
+      ticket_themes: [app_crash_pay]
+  benign_events:
+    - event_id: SURGE-US
+      kind: volume_surge
+      segment: {country: US}
+      start: 2026-09-12T18:00:00
+      duration_hours: 6
+      volume_multiplier: 1.8
+      description: US marketing email campaign (traffic up, conversion unchanged)
+
+  tickets:
+    background_per_hour: 1.5
+    theme_weights:
+      shipping_delay: 0.20
+      refund_request: 0.15
+      login_issue: 0.12
+      promo_code: 0.10
+      generic_decline: 0.15
+      app_performance: 0.08
+      paypal_refund: 0.07
+      account_update: 0.07
+      delivery_address: 0.06
+    channel_weights: {email: 0.40, chat: 0.35, app_review: 0.15, social: 0.10}
+    null_country_prob: 0.15
+    null_os_prob: 0.25
+    delay_mean_minutes: 25
+    delay_max_hours: 6
+
+detection:
+  freq: 1h
+  period: 24
+  weekly_period: 168
+  stl_seasonal: 21                  # STL seasonal smoother length in daily cycles (odd)
+  stl_trend: null                   # STL trend length in buckets (odd); null = one period + 1
+  mstl_min_weeks: 6.0               # MSTL(24, 168) once at least this many weeks of history exist
+  rolling_window: 3
+  n_estimators: 200
+  random_state: 42
+  min_window_buckets: 2
+  gap_tolerance: 1
+  stream_history_days: 14
+  stream_warmup_days: 7
+  stream_refit_every: 24
+  stream_level_buckets: 25         # live level = median of the last N deseasonalised buckets
+
+rca:
+  attributes: [country, os, device_type, payment_gateway, app_version]
+  baseline_days: 7
+  max_baseline_rows: 300000
+  p0_clip: 0.0001
+  m0_rounds: 150
+  m1_rounds: 100
+  learning_rate: 0.1
+  num_leaves: 15
+  min_child_samples: 40
+  lambda_l2: 1.0
+  num_threads: 0
+  shap_max_rows: 30000
+  interaction_rows: 2000
+  shap_positive_rel: 0.1
+  shap_positive_abs: 0.05
+  max_order: 4
+  top_k_patterns: 25
+  prune_tolerance: 0.05
+  min_ep: 0.10
+  alpha: 0.01
+  max_findings: 3
+  min_segment_rows: 30
+  brute_force_max_order: 3
+
+retrieval:
+  backend: auto                     # auto | sentence_transformers | lsa
+  model_name: sentence-transformers/all-MiniLM-L6-v2
+  lsa_dim: 128
+  top_k: 8
+  overfetch: 200
+  pad_before_h: 2.0
+  pad_after_h: 6.0
+  country_boost: 0.05
+  os_boost: 0.05
+  similarity_threshold: 0.35
+  random_state: 42
+
+llm:
+  provider: auto                    # auto | claude | template
+  model: claude-opus-5-5
+  max_tokens: 16000
+  max_retries: 2
+  server_side_fallback: true
+  timeout_s: 120
+
+reporting:
+  currency: USD
+  sev1_lost_revenue: 20000
+  sev2_lost_revenue: 5000
+  max_ticket_excerpts: 8
+  excerpt_chars: 300
+  memo_max_words: 200
+  numeric_rel_tol: 0.02
+  make_plots: true
+
+evaluation:
+  n_scenarios: 20
+  seed: 7
+  days: 14
+  attempts_per_hour: 3000
+  min_incidents: 1
+  max_incidents: 2
+  max_order: 3
+  min_segment_share: 0.03
+  max_segment_share: 0.25
+  duration_hours: [2, 6]
+  visibility_sigma: [4.0, 9.0]
+  failure_rate_bounds: [0.2, 0.95]
+  surge_multiplier: [1.5, 2.2]
+  surge_duration_hours: [3, 8]
+  ticket_rate: 0.04
+  backends: [lsa, sentence_transformers]
+  stream_mode: incidents             # incidents | full | off (full: also streaming P/R/F1, ~30 s per scenario)
+  incident_free_runs: 1             # extra incident-free scenarios for false alarms per day
+  quick_scenarios: 3                # n_scenarios for `evaluate --quick`
+  bootstrap_resamples: 1000
