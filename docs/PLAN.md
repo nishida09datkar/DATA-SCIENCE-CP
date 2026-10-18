@@ -26,7 +26,7 @@ Paths are under `src/kpi_rca/`. Stage interfaces are in `schemas.py`, config mod
 |---|---|---|
 | (a) Numbers and text sit in separate silos | Ticket search driven by the isolated segment and its error codes, limited to the anomaly window | P@5, P@10, R@10 |
 | (b) Finding DE ∧ iOS ∧ PayPal without brute force | Excess-failure model plus SHAP-guided slice search | Exact match, Jaccard, top-3; slices evaluated vs brute force |
-| (c) LLMs miscalculate on raw tables | Math first; the LLM sees only a compact JSON context; guardrails verify | Ablation A4 |
+| (c) LLMs miscalculate on raw tables | Math first; the LLM sees only a compact JSON context; guardrails verify | Guardrail grounding rate (A4 is out of scope: paid API) |
 
 How new each answer is (RESEARCH.md §3): (a) is partly covered by prior work, so the claim is the narrower one of driving ticket retrieval from the localised segment and window. (b) is largely covered by the multi-dimensional RCA literature; our contribution is the M0-offset excess framing plus SHAP-guided candidate generation, not avoiding brute force as such, and it is measured as fewer slices scored, not as a faster run (§4.3). (c) is a known problem with a known solution pattern; our contribution is the guardrails and their measurement in A4.
 
@@ -36,7 +36,7 @@ How new each answer is (RESEARCH.md §3): (a) is partly covered by prior work, s
 | Batch and streaming detection | Dashboards and BI connectors |
 | RCA of checkout failures; revenue impact | Automated remediation |
 | Retrieval with two embedding backends | Causal proof (we localise, engineers confirm) |
-| Claude or template memo (`.md`, `.json`, `.png`) | Fine-tuning; non-English tickets |
+| Template memo (default, free) or optional Claude memo (paid API) (`.md`, `.json`, `.png`) | Fine-tuning; non-English tickets |
 | CLI, evaluation, ablations; optional semi-synthetic validation | |
 
 - "30-second memo" means the headline and summary read in 30 seconds; summary plus root cause are capped at 200 words (`memo_max_words`). Generation time is the separate time-to-diagnosis target.
@@ -281,9 +281,9 @@ hallucination rate = ungrounded numbers / all numbers in the narrative
   - the findings and the ticket spike;
   - up to 8 ticket excerpts, which may be quoted but never count as facts.
 - **`llm.py`:**
-  - ClaudeNarrator calls `claude-opus-5-5` with structured outputs validated as `MemoNarrative`: headline, summary, root cause, up to 3 quotes, 1-4 actions with an owner and a P0-P2 priority, and low/medium/high confidence.
-  - TemplateNarrator needs no key.
-  - `auto` uses Claude when a key is set.
+  - TemplateNarrator is the default (`provider: template`): free, offline, needs no key.
+  - ClaudeNarrator is an optional, paid add-on, used only when asked for explicitly (`--narrator claude` or `provider: claude`). It calls `claude-opus-5-5` with structured outputs validated as `MemoNarrative`: headline, summary, root cause, up to 3 quotes, 1-4 actions with an owner and a P0-P2 priority, and low/medium/high confidence.
+  - `auto` uses Claude when a key is set, so it is opt-in too; no default selects it (free-testing policy).
 - **`guardrails.py`** checks:
   - schema and length limits;
   - numeric grounding: every number matches a context fact after normalisation ("$12.3k" = 12,345.67; "64.8%" = 0.648) within 2%, with only rounding slack for percentages;
@@ -330,12 +330,30 @@ Why:
 | A1 | MiniLM vs LSA | P@5, P@10, R@10 | MiniLM ≥ LSA; small gap on templated text |
 | A2 | M1 with vs without the offset | RCA metrics, BR-blamed rate | BR blamed without the offset |
 | A3 | Guided vs brute force, plus distractor attributes | Evaluations, runtime, exact match | Same accuracy, ≥ 10x fewer evaluations |
-| A4 | LLM on the raw window table vs the pipeline context | Hallucination rate, lost-revenue error, segment correct, tokens, cost | Far fewer hallucinations with the context |
+| A4 (paid API out of scope; free-model run proposed, §5.3) | LLM on the raw window table vs the pipeline context | Hallucination rate, lost-revenue error, segment correct, tokens, cost | Far fewer hallucinations with the context |
 | A5 (optional) | Metadata boosts on vs off | Retrieval metrics | Isolates the embedding effect |
 
-Status as built: A1, A2, A5 and the guided-vs-brute-force part of A3 run in `evaluate`. The A3 distractor attributes are **not run** yet (`metrics.json` says "not run (W5)"). A4 has only the context arm: the raw-table arm is **not implemented** (it needs its narrator variant), and A4 runs only with `--with-llm` and an API key, so it is skipped by default.
+Status as built: A1, A2, A5 and the guided-vs-brute-force part of A3 run in `evaluate`. The A3 distractor attributes are **not run** yet (`metrics.json` says "not run (W5)"). A4 has only the context arm: the raw-table arm is **not implemented** (it needs its narrator variant), and A4 calls the paid API, so under the free-testing policy it is **not run** (`metrics.json` says "not run (paid API; free-testing policy; ...)"); it runs only with `--with-llm` and an API key.
 
-**A4, the empirical test of gap (c):**
+**A4 is out of scope as specified.** The project is built and tested free of cost, so no paid API is called in any run, test, demo or evaluation, and no USD budget exists. The Claude code path stays (opt-in, `--with-llm`) but is never run by the team. Until the proposal below is adopted, gap (c) is argued from the design: the template memo takes every number from the deterministic context and passes the numeric-grounding guardrail at 1.00.
+
+**Proposal (for team decision): run A4 and the LLM guardrail runs on free models.**
+- **What:** add one `OpenAICompatNarrator` to `reporting/llm.py`, configured by `base_url`, `model` and the name of an environment variable holding the key (`provider: openai_compat`). The same JSON schema, guardrails, retry and template fallback apply. The template stays the default narrator; Claude stays opt-in.
+- **Providers, official free tiers only** (each member signs up and uses their own key; never shared, leaked or scraped keys, and no reverse-engineered web-chat proxies):
+
+  | Provider | Free model (check before use) | Key | Use |
+  |---|---|---|---|
+  | Ollama, local | Qwen / Llama / Gemma | none | Context arm, guardrail runs, demo |
+  | Zhipu | GLM-4-Flash | free sign-up | Context and raw arms |
+  | SiliconFlow | free Qwen / DeepSeek models | free sign-up | Context and raw arms |
+  | Google Gemini | free tier | free sign-up | Raw arm (long context) |
+
+- **Scale:** A4 is 60 calls (10 × 3 × 2) plus guardrail runs; it fits any free tier. The raw arm needs a long-context model (about 50k tokens), so Ollama is the context arm only.
+- **Reproducibility:** each run records provider, model name and version, and date in provenance; free tiers change without notice, so the W7 held-out LLM run is done once and its outputs kept.
+- **Tests:** a fake HTTP client only; CI and the test suite make no network calls.
+- **Owners and timing if adopted:** A builds the narrator and raw-arm variant (W5), D the A4 harness (W5); A runs guardrails on the free model (W6); A4 held-out in W7. A smaller free model makes A4 a stricter test of the context arm, which is stated as a limitation, not hidden.
+
+**A4 design (future work unless the proposal is adopted):**
 - 10 held-out scenarios × 3 repeats × 2 arms = 60 calls, with the same instructions and schema.
 - The raw arm gets window rows as CSV, capped near 50k tokens (about a tenth of INC-001's window); the forced sampling is itself a finding. The context arm gets the `context.py` JSON.
 - Score first-attempt outputs against the deterministic fact set with the guardrail tolerance.
@@ -350,21 +368,33 @@ Status as built: A1, A2, A5 and the guided-vs-brute-force part of A3 run in `eva
 | RCA | Top-3 ≥ 0.90, exact ≥ 0.75, Jaccard ≥ 0.85; BR never blamed; ≤ 10% of brute-force evaluations, with exact match within 5 points of brute force |
 | Retrieval | P@5 ≥ 0.80 (MiniLM), ≥ 0.60 (LSA); R@10 reported with its cap |
 | Guardrails | 100% of final memos compliant; first attempt ≥ 80%; after retries ≥ 95% |
-| A4 | Context-arm hallucination ≤ 2%; raw arm reported |
-| End-to-end | Median ≤ 60 s with the template (after the first model download), ≤ 2 min with Claude |
+| A4 | Out of scope (paid API); if the free-model proposal (§5.3) is adopted: context-arm hallucination ≤ 2%, raw arm reported |
+| End-to-end | Median ≤ 60 s with the template (after the first model download) |
 
 ### 5.5 Results template
 Fill this only from `outputs/evaluation/metrics.json` and `summary.md` of the tagged run.
 
 | Experiment | Metric | Mean (95% CI) | Target | Met? |
 |---|---|---|---|---|
-| Detection (streaming) | F1; median delay | | ≥ 0.85; ≤ 3 | |
-| RCA guided vs brute force | Exact match; evaluation ratio | | ≥ 0.75; ≤ 0.10 | |
-| A1 MiniLM / LSA | P@5 | | ≥ 0.80 / ≥ 0.60 | |
-| A2 no offset | BR-blamed rate | | report | |
-| A4 raw / context | Hallucination rate | | report / ≤ 0.02 | |
-| Guardrails (Claude) | First-attempt pass | | ≥ 0.80 | |
-| End-to-end template / Claude | Time-to-diagnosis (s) | | ≤ 60 / ≤ 120 | |
+| Detection (batch) | Recall; precision; F1 | 1.00; 0.62 (0.53-0.73); 0.77 (0.70-0.85) | ≥ 0.90; ≥ 0.80; ≥ 0.85 | recall yes; precision, F1 **no** |
+| Detection | Surges labelled kpi_drop; false kpi_drop windows/day (incident-free) | 0.00; 0.14 | 0; report | yes |
+| Detection (streaming) | F1; median delay | F1 not measured (`stream_mode: incidents`); delay 2.0 buckets, 0.97 of incidents detected | ≥ 0.85; ≤ 3 | delay yes |
+| RCA guided vs brute force | Exact match; evaluation ratio | 0.86 (0.74-0.97) vs 0.94 (0.86-1.00); 0.028 (0.028-0.029) | ≥ 0.75; ≤ 0.10 | yes |
+| RCA guided | Top-3; row-level Jaccard; BR blamed | 0.89 (0.77-0.97); 0.94 (0.88-0.99); 0.00 | ≥ 0.90; ≥ 0.85; 0 | top-3 **no** (31/35); others yes |
+| RCA guided vs brute force | Runtime ratio | 2.63 (2.48-2.77): median 9.3 s vs 3.3 s | report | guided is slower |
+| A1 MiniLM / LSA | P@5 | 0.91 (0.83-0.97) / 0.75 (0.69-0.81) | ≥ 0.80 / ≥ 0.60 | yes |
+| A2 no offset | BR-blamed rate | 0.00 (found 0.69, exact 0.57 without the offset) | report | |
+| A5 boosts off, MiniLM / LSA | P@5 | 0.83 / 0.70 | report | |
+| A4 raw / context | Hallucination rate | not run (paid API; free-testing policy) | report / ≤ 0.02 | |
+| Guardrails (template) | Pass rate | 1.00 | 1.00 | yes |
+| Guardrails (Claude) | First-attempt pass | not run (paid API; free-testing policy) | ≥ 0.80 | |
+| End-to-end template / Claude | Time-to-diagnosis (s) | 9.5 (8.9-10.1) compute per incident / not run | ≤ 60 / ≤ 120 | template yes |
+
+Run: `evaluate` with the default config, 20 scenarios, development seed 7, 2026-10-15, 688 s; not yet the tagged held-out run.
+
+**Detection precision miss (documented, not fixed).** 21 of 56 batch kpi_drop windows overlap no incident. Almost all are joint attempts-and-revenue dips (attempts z about -3 to -6) with conversion within 1% of expected, sometimes above it; a few sit at the series start (STL edge) or at midnight (day-level traffic noise). Step 5 of §4.1 labels them kpi_drop because revenue is below expected, while the benchmark counts only failure incidents. On held-out seed 101 (20 scenarios) precision is 0.43, so the miss is not a seed-7 artefact. A window-level gate (keep a kpi_drop only if pooled conversion is significantly below expected, one-sided binomial z at alpha 0.01) raised seed-101 precision to 0.89 with unchanged recall, but it redefines kpi_drop as conversion-only and needs a streaming counterpart, so it is left to the team as a decision, not changed silently.
+
+**RCA top-3 miss.** The 4 failures each drop one true attribute: {iOS, 5.3.0} → 5.3.0; {US, iOS, 5.4.0} → {US, 5.4.0}; {Android, mobile, 5.3.0} → {Android, 5.3.0}; {Android, mobile, 5.4.0} → {Android, 5.4.0}. In the traced cases the true slice was never among the 25 mined candidates: SHAP credit for a correlated or nested value (os given app_version, mobile given Android) falls below the positive threshold (RESEARCH.md §5, threat 3). It is not the prune step. Brute force gets 3 of the 4 right; the fourth is the nested mobile/tablet case, where the 5% tie rule prefers the smaller slice. A candidate fix (score the one-attribute extensions of the chosen slice) is not implemented or measured.
 
 ---
 
@@ -379,10 +409,10 @@ Slices meet only in `schemas.py`:
 
 | Member | Owns | Delivers | Must explain |
 |---|---|---|---|
-| **A, Team Lead** (integration, reporting, LLM, report) | `schemas.py`, `config.py`, `pipeline.py`, `cli.py`, `reporting/*`, `pyproject.toml`, README, CI; arbitrates the YAML | Adversarial guardrail tests, A4 narrator variant, prompt and cost log, releases, edited report | Why the LLM never sees raw data, context design, number normalisation, structured outputs vs guardrails, retry, fallback, impact formulas and their noise |
+| **A, Team Lead** (integration, reporting, LLM, report) | `schemas.py`, `config.py`, `pipeline.py`, `cli.py`, `reporting/*`, `pyproject.toml`, README, CI; arbitrates the YAML | Adversarial guardrail tests, template memo quality, releases, edited report | Why the LLM never sees raw data, context design, number normalisation, structured outputs vs guardrails, retry, fallback, impact formulas and their noise |
 | **B, data and detection** | `data/*`, `detection/*`; scenario config | STL plots, STL vs MSTL rerun, detection metrics and delay, incident-free and red-team scenarios, recall by visibility | STL and the MSTL decision, noise scaling, MAD, IsolationForest path length and `"auto"`, direction labels, batch vs streaming, generator assumptions |
 | **C, root-cause analysis** | `rca/*` | M0 calibration, BR check, SHAP plots, brute-force agreement, A2, A3 with a scaling curve | Log-odds and `init_score`, boosting, TreeSHAP additivity, interactions, EP and purity, z-test and multiple testing, brute-force complexity |
-| **D, retrieval and evaluation** | `retrieval/*`, `evaluation.py`, ablation runners | Per-backend retrieval metrics, A1, A5, A4 harness, bootstrap CIs, results tables and figures | MiniLM, LSA, cosine as inner product, FAISS flat vs IVF/HNSW, query design, P@k, R@k and its cap, seeds, bootstrap |
+| **D, retrieval and evaluation** | `retrieval/*`, `evaluation.py`, ablation runners | Per-backend retrieval metrics, A1, A5, A3 distractor runs, bootstrap CIs, results tables and figures | MiniLM, LSA, cosine as inner product, FAISS flat vs IVF/HNSW, query design, P@k, R@k and its cap, seeds, bootstrap |
 
 ---
 
@@ -396,9 +426,9 @@ Slices meet only in `schemas.py`:
 | W2 | Understand | Explainer + 2 tests | Explainer + 2 tests | Explainer + 2 tests | Explainer + 2 tests |
 | W3 | Validate | Adversarial guardrail tests; confirm targets | STL plots, STL vs MSTL rerun, label and delay checks | M0 calibration, BR, brute-force agreement | Retrieval and label sanity |
 | W4 | **Checkpoint 1** | Integration fixes | Reproduce end-to-end | Reproduce end-to-end | 20-scenario dev run, "results v0" |
-| W5 | Extend | A4 harness, budget | Incident-free, red-team, distractor scenarios | A2, SHAP interactions | A1, A5 |
-| W6 | Experiment (dev) | Guardrail runs with Claude | Recall by visibility | A3 scaling curve | Aggregation, CIs |
-| W7 | **Checkpoint 2** | Freeze (git tag); A4 | Held-out detection | Held-out RCA | Held-out evaluation; results table |
+| W5 | Extend | Template memo review; guardrail edge cases | Incident-free, red-team, distractor scenarios | A2, SHAP interactions | A1, A5 |
+| W6 | Experiment (dev) | Guardrail runs on the template memos | Recall by visibility | A3 scaling curve | Aggregation, CIs |
+| W7 | **Checkpoint 2** | Freeze (git tag) | Held-out detection | Held-out RCA | Held-out evaluation; results table |
 | W8 | Optional, buffer | Figures, README | Semi-synthetic validation (with D) | Literature baseline | Semi-synthetic validation (with B) |
 | W9 | Write | Edit report; slides; backup video | Data and detection chapters | RCA chapters | Retrieval and results chapters |
 | W10 | Rehearse, submit | Mock viva; submit | Mock viva | Mock viva | Mock viva |
@@ -434,7 +464,7 @@ Exit criteria:
 
 | Risk | L | I | Mitigation | Owner |
 |---|---|---|---|---|
-| No API key, or LLM cost overrun | M | M | Template narrator in CI and demo; USD 25 cap; token log | A |
+| Paid API spend by accident | L | M | Template is the default narrator; A4 runs only with `--with-llm`; a test guards both; no paid runs at all | A |
 | Embedding model download fails | M | L | LSA fallback; pre-cached model; CI on LSA | D |
 | "Synthetic data is unrealistic" | H | M | Threats section, red-team scenarios, W8 semi-synthetic validation | B |
 | Overfitting to the default scenario | M | H | Random scenarios, held-out seed, config frozen, targets fixed in W3 | D |
@@ -506,7 +536,7 @@ Appendices: AI-use disclosure, config, extra results, user guide.
 **Backup:** a recorded video and pre-generated outputs. Without network, use the template provider.
 
 ### 10.5 Viva question bank
-1. **Why not give the LLM the raw data?** About 1.8M rows do not fit, LLMs miscalculate over tables, and it costs more; A4 measures this.
+1. **Why not give the LLM the raw data?** About 1.8M rows do not fit, LLMs miscalculate over tables, and it costs more. We did not measure this (A4 needs a paid API; the project is free); every memo number comes from the deterministic context and is checked by the grounding guardrail.
 2. **Why STL?** Each hour gets its own expected value despite the daily cycle; the robust fit down-weights incident hours, and noise scaling keeps thin night hours from looking anomalous.
 3. **Weekly seasonality?** We measured it. With three weeks of data, MSTL (24, 168) gave over ten times as many false extreme z-scores as STL, because each hour-of-week value rests on three points. MSTL waits for six weeks; until then the STL trend tracks the weekly level.
 4. **Isn't `contamination="auto"` a hidden threshold?** It is the paper's fixed rule (score above 0.5), not tuned to our data; the incident-free run shows its cost.

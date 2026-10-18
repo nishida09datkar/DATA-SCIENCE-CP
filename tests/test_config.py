@@ -21,6 +21,12 @@ def test_defaults_are_valid():
     assert cfg.retrieval.top_k == 8 and cfg.llm.model == "claude-opus-5-5"
 
 
+def test_default_narrator_is_the_free_template():
+    # Free-testing policy: Claude is a paid API, so no default may select it, even with a key set.
+    assert AppConfig().llm.provider == "template"
+    assert load_config(ROOT / "config" / "default.yaml").llm.provider == "template"
+
+
 def test_default_yaml_loads():
     cfg = load_config(ROOT / "config" / "default.yaml")
     defaults = AppConfig()

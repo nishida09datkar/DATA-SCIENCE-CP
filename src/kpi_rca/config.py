@@ -531,7 +531,9 @@ class RetrievalConfig(_Model):
 
 
 class LLMConfig(_Model):
-    provider: Literal["auto", "claude", "template"] = "auto"
+    # "template" by default: free and offline. Claude is a paid API and strictly opt-in
+    # (provider "claude", or "auto", which uses Claude whenever a key is in the environment).
+    provider: Literal["auto", "claude", "template"] = "template"
     model: str = "claude-opus-5-5"
     max_tokens: int = 16000
     max_retries: int = 2

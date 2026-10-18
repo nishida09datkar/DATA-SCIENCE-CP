@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--narrator",
         choices=["auto", "claude", "template"],
         default=None,
-        help="override llm.provider (auto = Claude when credentials are set, else the template)",
+        help="override llm.provider (default from the config: template, free); claude calls the paid API",
     )
     p.add_argument("--quiet", action="store_true", help="print the window table only, not the memos")
 

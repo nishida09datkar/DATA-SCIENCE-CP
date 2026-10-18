@@ -152,7 +152,7 @@ retrieval:
   random_state: 42
 
 llm:
-  provider: auto                    # auto | claude | template
+  provider: template                # template (free, default) | claude (paid API, opt-in) | auto (claude when a key is set)
   model: claude-opus-5-5
   max_tokens: 16000
   max_retries: 2

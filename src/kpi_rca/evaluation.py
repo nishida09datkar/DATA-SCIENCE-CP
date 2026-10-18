@@ -577,11 +577,12 @@ def run_evaluation(
 
 def _run_a4(cfg: AppConfig, contexts: list[dict], with_llm: bool) -> dict:
     """Ablation A4, context arm only: Claude on the pipeline context, scored by the guardrails."""
+    # Free-testing policy: A4 calls a paid API, so it runs only when explicitly asked for.
+    if not with_llm:
+        return {"status": "not run (paid API; free-testing policy; opt in with --with-llm)"}
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     if not has_key:
         return {"status": "skipped (no API key)"}
-    if not with_llm:
-        return {"status": "skipped (pass --with-llm to spend API credits)"}
     llm_cfg = cfg.llm.model_copy(update={"provider": "claude"})
     try:
         narrator = get_narrator(llm_cfg, memo_max_words=cfg.reporting.memo_max_words)

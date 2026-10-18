@@ -165,7 +165,7 @@ def test_run_writes_the_three_outputs(tiny_run):
     folder = out / "evaluation"
     metrics = json.loads((folder / "metrics.json").read_text(encoding="utf-8"))
     assert {"settings", "detection", "rca", "retrieval", "guardrails", "a4_llm", "end_to_end"} <= set(metrics)
-    assert metrics["a4_llm"]["status"] == "skipped (no API key)"
+    assert metrics["a4_llm"]["status"].startswith("not run (paid API")
     assert metrics["rca"]["a3_distractors"] == "not run (W5)"
     assert metrics["retrieval"]["lsa"]["status"] == "run"
     assert "| Detection (batch) | Recall |" in (folder / "summary.md").read_text(encoding="utf-8")
@@ -178,6 +178,16 @@ def test_template_memos_always_pass_the_guardrails(tiny_run):
     result, _ = tiny_run
     rate = result.metrics["guardrails"]["template"]["pass_rate"]
     assert rate is None or rate == 1.0
+
+
+def test_a4_is_not_run_without_with_llm_even_when_a_key_is_set(monkeypatch):
+    def no_paid_calls(*args, **kwargs):
+        raise AssertionError("A4 built a Claude narrator without --with-llm")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-a-real-key")
+    monkeypatch.setattr(E, "get_narrator", no_paid_calls)
+    status = E._run_a4(tiny_cfg(), contexts=[{}], with_llm=False)["status"]
+    assert status.startswith("not run (paid API; free-testing policy")
 
 
 def test_unavailable_backend_is_skipped(monkeypatch):
