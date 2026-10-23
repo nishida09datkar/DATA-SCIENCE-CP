@@ -73,6 +73,18 @@ def test_incident_forces_failures_only_inside_segment_and_time(small_scenario):
     assert tx.loc[coded, "latency_ms"].median() > 3 * tx.loc[in_seg & ~in_time, "latency_ms"].median()
 
 
+
+def test_true_loss_counts_only_orders_the_incident_destroyed(small_cfg, small_scenario):
+    # Baseline outcomes are drawn before incidents, so the same seed without the incident
+    # gives the counterfactual: the true loss is what succeeded there and failed here.
+    clean = generate_scenario(small_cfg.data.model_copy(update={"incidents": []}), small_cfg.seed).transactions
+    tx = small_scenario.transactions
+    inc = small_scenario.ground_truth.incidents[0]
+    lost = (clean["success"] == 1) & (tx["success"] == 0)
+    assert inc.lost_orders == int(lost.sum()) > 0
+    assert inc.lost_orders < inc.forced_failures  # some forced failures had failed anyway
+    assert inc.lost_revenue == pytest.approx(tx.loc[lost, "amount"].sum(), abs=0.01)
+
 def test_benign_surge_raises_volume_not_failures(small_scenario):
     tx = small_scenario.transactions
     ev = small_scenario.ground_truth.benign_events[0]

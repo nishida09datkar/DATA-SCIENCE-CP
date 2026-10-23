@@ -191,6 +191,14 @@ def test_no_findings_means_nothing_to_check():
     assert check_segment_consistency("Anything.", {"findings": []}) == []
 
 
+def test_country_names_and_known_values_come_from_the_config():
+    ctx = {"findings": [{"attributes": [{"attribute": "country", "value": "NL"}]}]}
+    assert len(check_segment_consistency("Dutch shoppers fail.", ctx)) == 1  # NL is not in the defaults
+    cfg = ReportingConfig(country_names={"NL": ["Netherlands", "Dutch"]}, known_segment_values={"country": ["NL", "BE"]})
+    assert check_segment_consistency("Dutch shoppers fail.", ctx, cfg) == []
+    assert len(check_segment_consistency("Dutch and BE shoppers fail.", ctx, cfg)) == 1  # BE is in no finding
+
+
 # --- quote grounding ---------------------------------------------------------
 
 

@@ -249,6 +249,14 @@ def test_query_does_not_depend_on_attribute_order():
     assert build_query(reordered) == build_query(PAYPAL_IOS_DE)
 
 
+def test_query_attributes_and_wording_come_from_the_config():
+    # another dataset (REES46) has category / brand instead of gateway / OS
+    cfg = RetrievalConfig(query_attributes=["category", "brand"], customer_words={"brand": {"samsung": "Samsung phone"}})
+    finding = make_finding({"category": "electronics", "brand": "samsung", "os": "iOS"})
+    assert build_query(finding, [], cfg) == "electronics Samsung phone payment failed at checkout"
+    assert build_query(finding, [], RetrievalConfig()) == build_query(finding, [])  # defaults unchanged
+
+
 # --- TicketIndex: retrieval -------------------------------------------------------------
 
 TICKET_COLUMNS = ["ticket_id", "created_at", "channel", "customer_country", "device_os", "text"]
@@ -457,3 +465,22 @@ def test_search_before_build_raises():
 def test_search_rejects_bad_arguments(index, start, end, k, message):
     with pytest.raises(ValueError, match=message):
         index.search(QUERY, start, end, k=k)
+
+
+def test_my_retrieval_test_the_window_filter_holds_on_a_generated_scenario(small_scenario):
+    """Owner A's retrieval test: on real generated tickets, no hit falls outside the padded window."""
+    inc = small_scenario.ground_truth.incidents[0]
+    tickets = small_scenario.tickets.drop(columns=["gt_incident_id"])  # the answer key never reaches the index
+    index = TicketIndex(LSAEmbedder(), CFG).build(tickets)
+    result = index.search(build_query(PAYPAL_IOS_DE, ["PAYPAL_SDK_TIMEOUT"]), inc.start, inc.end, PAYPAL_IOS_DE, k=10_000)
+
+    created = pd.to_datetime(tickets["created_at"])
+    in_range = (created >= result.search_start) & (created < result.search_end)
+    assert result.search_start < inc.start and result.search_end > inc.end  # the window is padded
+    assert result.n_candidates == int(in_range.sum()) == len(result.hits)
+    assert all(result.search_start <= h.created_at < result.search_end for h in result.hits)
+    # tickets exist on both sides of the range, so the filter really removed something
+    assert (created < result.search_start).any() and (created >= result.search_end).any()
+    # and the incident's own tickets inside the range are among the top hits
+    own = set(small_scenario.tickets.loc[small_scenario.tickets["gt_incident_id"] == inc.incident_id, "ticket_id"])
+    assert own and {h.ticket_id for h in result.hits[: len(own)]} & own

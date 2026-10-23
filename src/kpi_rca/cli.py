@@ -26,6 +26,10 @@ DEFAULT_OUT_DIR = Path("outputs")
 
 EXIT_OK = 0
 EXIT_USAGE = 2
+EXTERNAL_DATASET = (
+    "`{command}` works on generated data only and this config has dataset: external; "
+    "score a real dataset with scripts/validate_rees46.py (injected incidents on a copy)"
+)
 
 log = logging.getLogger("kpi_rca.cli")
 
@@ -62,9 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", "--out", dest="out_dir", type=Path, default=DEFAULT_OUT_DIR)
     p.add_argument(
         "--narrator",
-        choices=["auto", "claude", "template"],
+        choices=["auto", "claude", "openai_compatible", "template"],
         default=None,
-        help="override llm.provider (default from the config: template, free); claude calls the paid API",
+        help="override llm.provider (default from the config: template, free); openai_compatible calls "
+        "llm.base_url (a local Ollama by default); claude calls the paid API",
     )
     p.add_argument("--quiet", action="store_true", help="print the window table only, not the memos")
 
@@ -81,7 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quick", action="store_true", help="use evaluation.quick_scenarios scenarios")
     p.add_argument("--seed", type=int, default=None, help="override evaluation.seed")
     p.add_argument("--stream", choices=["full", "incidents", "off"], default=None, help="override evaluation.stream_mode")
-    p.add_argument("--with-llm", action="store_true", help="also run ablation A4 with Claude (costs money)")
+    p.add_argument("--with-llm", action="store_true", help="also run ablation A4: with Claude (costs money), or with the "
+                   "openai_compatible narrator when llm.provider is openai_compatible (free with a local server)")
+    p.add_argument("--narrator", choices=["claude", "openai_compatible"], default=None,
+                   help="override llm.provider for --with-llm (openai_compatible: llm.base_url, a local Ollama by default)")
     return parser
 
 
@@ -107,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
 def cmd_generate(args: argparse.Namespace, cfg: AppConfig) -> int:
     from kpi_rca.data import generate_scenario, save_scenario
 
+    if cfg.dataset == "external":
+        return fail(EXTERNAL_DATASET.format(command="generate"))
     seed = cfg.seed if args.seed is None else args.seed
     scenario = generate_scenario(cfg.data, seed)
     paths = save_scenario(scenario, args.out_dir)
@@ -144,6 +154,8 @@ def cmd_run(args: argparse.Namespace, cfg: AppConfig) -> int:
         narrator = get_narrator(cfg.llm, memo_max_words=cfg.reporting.memo_max_words)
     except TypeError as exc:  # the Anthropic SDK's error for a client without credentials
         return fail(f"{no_credentials} ({exc})")
+    except ValueError as exc:  # openai_compatible: a bad or paid base URL
+        return fail(str(exc))
 
     try:
         summary = run_pipeline(cfg, args.data_dir, args.out_dir, narrator_override=narrator)
@@ -173,7 +185,7 @@ def cmd_stream(args: argparse.Namespace, cfg: AppConfig) -> int:
     if problem:
         return fail(problem)
     try:
-        scenario = load_scenario(args.data_dir)
+        scenario = load_scenario(args.data_dir, attributes=cfg.rca.attributes)
         kpis = aggregate_kpis(scenario.transactions, cfg.detection.freq)
         detector = StreamingDetector(cfg.detection)
     except ValueError as exc:
@@ -204,11 +216,15 @@ def cmd_stream(args: argparse.Namespace, cfg: AppConfig) -> int:
 def cmd_evaluate(args: argparse.Namespace, cfg: AppConfig) -> int:
     from kpi_rca.evaluation import run_evaluation
 
+    if cfg.dataset == "external":
+        return fail(EXTERNAL_DATASET.format(command="evaluate"))
     n = args.scenarios
     if n is None and args.quick:
         n = cfg.evaluation.quick_scenarios
     if n is not None and n < 1:
         return fail("--scenarios must be at least 1")
+    if args.narrator is not None:
+        cfg = cfg.model_copy(update={"llm": cfg.llm.model_copy(update={"provider": args.narrator})})
     result = run_evaluation(
         cfg,
         args.out_dir,

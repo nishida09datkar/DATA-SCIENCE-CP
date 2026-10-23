@@ -1,0 +1,19 @@
+# REES46 (real e-commerce traffic) mapped by kpi_rca.data.adapters; merged over the defaults.
+# Make the data directories with:
+#   .venv\Scripts\python scripts\validate_rees46.py --month 2019-Oct --incidents 0 --export data/rees46
+# then:
+#   .venv\Scripts\python -m kpi_rca run --config config/rees46.yaml --data data/rees46/injected --out outputs/rees46_run
+
+dataset: external  # rca.attributes are REES46 columns; `generate` and `evaluate` refuse this config
+
+rca:
+  attributes: [category, brand, price_band]
+
+retrieval:
+  # REES46 has no ticket text, so retrieval is skipped; these only matter if a text source is added.
+  query_attributes: [category, brand]
+  customer_words: {}
+
+reporting:
+  # The generator's countries, OSs and gateways do not exist in this data.
+  known_segment_values: {}

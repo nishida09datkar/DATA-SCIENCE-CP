@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from kpi_rca.config import ReportingConfig
+from kpi_rca.detection import aggregate_kpis, detect_anomalies
 from kpi_rca.reporting.impact import compute_financial_impact
 from kpi_rca.schemas import AnomalyWindow, SegmentAttribute, SegmentFinding
 
@@ -60,12 +61,14 @@ def make_finding():
 
 
 def one_bucket_shortfall(shortfall):
+    # 800 orders expected at USD 50 each; shortfall / 50 of them are lost
+    successes = 800 - shortfall / 50
     index = pd.DatetimeIndex([datetime(2026, 9, 10, 14)], name="bucket")
     scores = pd.DataFrame(
         {
             "attempts": [1000],
-            "successes": [800],
-            "revenue": [50000.0 - shortfall],
+            "successes": [successes],
+            "revenue": [successes * 50],
             "revenue_expected": [50000.0],
             "conversion_rate_expected": [0.8],
         },
@@ -76,10 +79,25 @@ def one_bucket_shortfall(shortfall):
 
 def test_losses_are_summed_over_window_buckets_only_and_clipped_at_zero():
     impact = compute_financial_impact(make_window(), make_scores(), make_finding(), CFG)
-    # 14:00 loses 15,000 and 300 orders, 15:00 loses 18,000 and 360 orders,
-    # 16:00 beats its expectation, which must not cancel the earlier losses
-    assert impact.lost_revenue == pytest.approx(33000.0)
+    # 14:00 loses 300 orders, 15:00 loses 360, 16:00 beats its expectation, which must
+    # not cancel the earlier losses; the window's orders average 96,000 / 1,920 = USD 50
     assert impact.lost_orders == pytest.approx(660.0)
+    assert impact.lost_revenue == pytest.approx(660 * 50.0)
+
+
+def test_lost_revenue_uses_the_window_order_value_not_the_noisy_revenue_fit():
+    scores = make_scores()
+    scores["revenue_expected"] = 1e9  # a wild revenue fit must not move the estimate
+    assert compute_financial_impact(make_window(), scores, None, CFG).lost_revenue == pytest.approx(33000.0)
+
+
+def test_a_window_with_no_successes_falls_back_to_the_expected_order_value():
+    scores = make_scores()
+    scores[["successes", "revenue"]] = 0.0
+    impact = compute_financial_impact(make_window(), scores, None, CFG)
+    # 2,560 orders expected; expected revenue 128,000 / 2,560 = USD 50 per order
+    assert impact.lost_orders == pytest.approx(2560.0)
+    assert impact.lost_revenue == pytest.approx(2560 * 50.0)
 
 
 def test_duration_rate_and_conversion_come_from_the_same_rows():
@@ -143,3 +161,14 @@ def test_window_outside_the_scores_is_rejected():
     window = make_window(start=datetime(2026, 9, 20, 14), end=datetime(2026, 9, 20, 17))
     with pytest.raises(ValueError, match="no score rows"):
         compute_financial_impact(window, make_scores(), None, CFG)
+
+
+def test_estimated_loss_is_close_to_the_generator_truth(small_cfg, small_scenario):
+    det = detect_anomalies(aggregate_kpis(small_scenario.transactions, small_cfg.detection.freq), small_cfg.detection)
+    inc = small_scenario.ground_truth.incidents[0]
+    window = next(w for w in det.windows if w.kpi_type == "kpi_drop" and w.start < inc.end and inc.start < w.end)
+    impact = compute_financial_impact(window, det.scores, None, small_cfg.reporting)
+    # 2026-10-23: 236 vs 267 orders, USD 13,187 vs 17,084. The estimate counts the shortfall
+    # against the fitted conversion, which a 4-hour incident pulls down a little.
+    assert impact.lost_orders == pytest.approx(inc.lost_orders, rel=0.2)
+    assert impact.lost_revenue == pytest.approx(inc.lost_revenue, rel=0.3)

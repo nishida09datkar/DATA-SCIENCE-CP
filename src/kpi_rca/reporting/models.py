@@ -70,7 +70,7 @@ class GuardrailReport(BaseModel):
     attempts: int  # narrator calls made (the template fallback is not counted)
     violations: list[str]  # violations of the final narrative
     attempt_violations: list[list[str]]  # violations of each checked draft, in order
-    narrator_used: str  # "claude" | "template" | "template_fallback"
+    narrator_used: str  # "claude" | "openai_compatible" | "template" | "template_fallback"
     fallback_used: bool
     fallback_reason: str | None = None
 

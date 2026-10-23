@@ -40,17 +40,9 @@ from kpi_rca.reporting.models import (
 TRIVIAL_INT_MAX = 10  # bare integers up to this are always allowed ("3 actions")
 UNTRUSTED_KEYS = frozenset({"excerpt"})  # context keys that hold customer-written text
 
-# Country codes used by the data generator, with the names a writer would use.
-COUNTRY_NAMES: dict[str, list[str]] = {
-    "US": ["United States", "USA", "U.S."],
-    "DE": ["Germany", "German"],
-    "GB": ["United Kingdom", "UK", "Britain", "British"],
-    "FR": ["France", "French"],
-    "IN": ["India", "Indian"],
-    "BR": ["Brazil", "Brazilian"],
-    "CA": ["Canada", "Canadian"],
-    "JP": ["Japan", "Japanese"],
-}
+# Country names and the known segment values come from ReportingConfig; these are its defaults.
+_DEFAULT = ReportingConfig()
+_ERROR_CODE = re.compile(r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\b")  # PAYPAL_SDK_TIMEOUT names no segment
 
 # --- number extraction -------------------------------------------------------
 
@@ -266,9 +258,9 @@ def _is_grounded(n: ExtractedNumber, facts: list[float], rel_tol: float) -> bool
 # --- (c) segment consistency ----------------------------------------------------
 
 
-def _aliases(attribute: str, value: str) -> list[str]:
+def _aliases(attribute: str, value: str, country_names: dict[str, list[str]]) -> list[str]:
     if attribute == "country":
-        return [value, *COUNTRY_NAMES.get(value, [])]
+        return [value, *country_names.get(value, [])]
     if attribute == "app_version":
         return [value, "v" + value]
     return [value]
@@ -279,16 +271,36 @@ def _mentions(text: str, alias: str) -> bool:
     return re.search(r"(?<![A-Za-z0-9])" + re.escape(alias) + r"(?![A-Za-z0-9])", text, flags) is not None
 
 
-def check_segment_consistency(text: str, context: dict) -> list[str]:
-    """Every attribute value of the top finding must be named in the narrative."""
+def _names(text: str, alias: str) -> bool:
+    """Case-sensitive whole-word match, for spotting proper nouns that should not be there."""
+    return re.search(r"(?<![A-Za-z0-9])" + re.escape(alias) + r"(?![A-Za-z0-9])", text) is not None
+
+
+def check_segment_consistency(text: str, context: dict, cfg: ReportingConfig | None = None) -> list[str]:
+    """Every value of the top finding must be named, and no known value outside the findings may be.
+
+    The second rule covers proper-noun attributes only (cfg.known_segment_values):
+    device types are common words, and app versions are already checked by
+    numeric grounding. Matching is case-sensitive so "anomaly windows" is not
+    the OS, and error codes like PAYPAL_SDK_TIMEOUT are skipped.
+    """
+    cfg = cfg or _DEFAULT
     findings = context.get("findings") or []
-    if not findings:
-        return []
     violations = []
-    for attr in findings[0].get("attributes", []):
-        attribute, value = attr["attribute"], str(attr["value"])
-        if not any(_mentions(text, alias) for alias in _aliases(attribute, value)):
-            violations.append(f"segment value '{value}' ({attribute}) of the top finding is not mentioned")
+    if findings:
+        for attr in findings[0].get("attributes", []):
+            attribute, value = attr["attribute"], str(attr["value"])
+            if not any(_mentions(text, alias) for alias in _aliases(attribute, value, cfg.country_names)):
+                violations.append(f"segment value '{value}' ({attribute}) of the top finding is not mentioned")
+
+    found = {(a["attribute"], str(a["value"])) for f in findings for a in f.get("attributes", [])}
+    prose = _ERROR_CODE.sub(" ", text)
+    for attribute, known in cfg.known_segment_values.items():
+        for value in known:
+            if (attribute, value) in found:
+                continue
+            if any(_names(prose, alias) for alias in _aliases(attribute, value, cfg.country_names)):
+                violations.append(f"segment value '{value}' ({attribute}) is named but is not in any RCA finding")
     return violations
 
 
@@ -381,6 +393,6 @@ def check_narrative(narrative: MemoNarrative | dict, context: dict, cfg: Reporti
         violations += [f"{name}: {v}" for v in check_numeric_grounding(text, facts, cfg.numeric_rel_tol)]
 
     story = " ".join([narrative.headline, narrative.executive_summary, narrative.root_cause_explanation])
-    violations += check_segment_consistency(story, context)
+    violations += check_segment_consistency(story, context, cfg)
     violations += check_quote_grounding(narrative.customer_evidence, context)
     return violations

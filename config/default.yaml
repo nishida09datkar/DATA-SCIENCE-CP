@@ -152,12 +152,18 @@ retrieval:
   random_state: 42
 
 llm:
-  provider: template                # template (free, default) | claude (paid API, opt-in) | auto (claude when a key is set)
+  provider: template                # template (free, default) | openai_compatible (local Ollama by default) | claude (paid API, opt-in) | auto (claude when a key is set)
   model: claude-opus-5-5
   max_tokens: 16000
   max_retries: 2
   server_side_fallback: true
   timeout_s: 120
+  base_url: http://localhost:11434/v1   # openai_compatible only; env LLM_BASE_URL overrides
+  openai_model: gemma3:1b               # env LLM_MODEL overrides
+  api_key_env: LLM_API_KEY              # name of the env var holding the key; the key itself never goes here
+  response_format: json_schema          # json_schema | json_object (for servers without schema support)
+  effort: null                          # low | medium | high, sent as reasoning_effort when set
+  temperature: 0.0
 
 reporting:
   currency: USD

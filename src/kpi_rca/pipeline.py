@@ -77,7 +77,7 @@ def load_data(cfg: AppConfig, data: str | Path | Scenario | None) -> Scenario:
         return generate_scenario(cfg.data, cfg.seed)
     if isinstance(data, Scenario):
         return data
-    return load_scenario(data)
+    return load_scenario(data, attributes=cfg.rca.attributes)
 
 
 def build_ticket_index(tickets: pd.DataFrame | None, cfg: AppConfig) -> TicketIndex | None:
@@ -169,7 +169,8 @@ def _report_window(
     t = time.perf_counter()
     retrieval = None
     if top is not None and index is not None:
-        retrieval = index.search(build_query(top, list(top.top_error_codes)), window.start, window.end, finding=top)
+        query = build_query(top, list(top.top_error_codes), cfg.retrieval)
+        retrieval = index.search(query, window.start, window.end, finding=top)
     timings["retrieval_s"] = time.perf_counter() - t
 
     t = time.perf_counter()
