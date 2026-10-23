@@ -14,10 +14,10 @@ As of 2026-10-23, commit `b7a355c` (pushed to `origin/main`). Scope and targets:
 | [4. Success criteria](#4-success-criteria-plan-54) | 12 / 19 met | | 4 missed, 3 not measured | 63% |
 | [5. Ablations](#5-ablations-plan-53) | 3 / 5 | 1 (A3) | 1 (A4, out of scope) | 70% |
 | [6. Design review notes](#6-design-review-notes-plan-end) | 2 / 8 | 4 | 2 | 50% |
-| [7. Project deliverables](#7-project-deliverables-plan-8-and-10) | 3 / 17 | 2 | 12 | 24% |
+| [7. Project deliverables](#7-project-deliverables-plan-8-and-10) | 5 / 17 | 3 | 9 | 38% |
 | [8. Timeline W1-W10](#8-timeline-w1-w10-plan-7) | 0 / 10 weeks closed | W4 (D) and W5-W6 (D) work exists from v1 | | W1 not yet closed |
 
-Short version: the **software is built and tested**; the **numbers exist for the dev seed** (two targets missed); the **team work** (understanding, validating, README, CI, report, slides) has **not started**.
+Short version: the **software is built and tested**; the **numbers exist for the dev seed** (four targets missed); README, CI workflow and AI-use log now exist; the **team work** (explainers, validation, report, slides) has **not started**.
 
 ## 2. Code modules
 
@@ -52,17 +52,19 @@ Free-only rules (decision 2026-10-15) are guarded by tests: `test_default_narrat
 
 | Done | Item | Evidence |
 |---|---|---|
-| [x] | 261 tests pass | `.venv\Scripts\python -m pytest -q` on 2026-10-23: `261 passed` |
-| [x] | No network or key needed | Claude client is injected or faked in `tests/test_llm.py`; LSA backend in CI-style runs |
+| [x] | 261 tests pass | `.venv\Scripts\python -m pytest -q` on 2026-10-23: 261 passed |
+| [x] | Pass from a clean copy without the embeddings extra | 2026-10-23: `uv sync --locked --extra dev` then `uv run --no-sync pytest` gave `261 passed in 135.83s` (the README and CI steps) |
+| [x] | No network or key needed | Claude client is injected or faked in `tests/test_llm.py`; `sentence_transformers` is faked in `tests/test_retrieval.py` |
 | [ ] | Each member's own 2 tests (W2) | None yet; every test so far is from the v1 |
 | [ ] | Adversarial guardrail tests by A (W3) | Not written; existing guardrail tests are the v1's |
-| [ ] | Run in CI | No `.github/workflows/` exists |
+| [~] | Run in CI | `.github/workflows/ci.yml` written; not yet run on GitHub (runs on the first push) |
 
 ## 4. Success criteria (PLAN §5.4)
 
 Source: `evaluate` with the default config, 20 scenarios, dev seed 7. Evidence file: `outputs/evaluation/metrics.json` and `summary.md`, regenerated on 2026-10-23 by
-`.venv\Scripts\python -m kpi_rca evaluate --scenarios 20 --out outputs/evaluation`.
-`outputs/` is git-ignored, so the files are local; anyone can regenerate them with that command (about 11 min). This is **not** the held-out run (W7).
+`.venv\Scripts\python -m kpi_rca evaluate --scenarios 20 --out outputs` (the command adds `evaluation/` itself).
+`outputs/` is git-ignored, so the files are local; anyone can regenerate them with that command (848 s on 2026-10-23). This is **not** the held-out run (W7).
+Reproducibility check: the 2026-10-23 rerun matched the 2026-10-15 run on every accuracy metric. Only timings changed (the machine was also running the test suite), so the timings below are from 2026-10-23.
 
 | # | Met? | Criterion | Target | Result (95% CI) |
 |---|---|---|---|---|
@@ -84,15 +86,15 @@ Source: `evaluate` with the default config, 20 scenarios, dev seed 7. Evidence f
 | 16 | [x] | 100% of final memos compliant | 1.00 | 1.00 (template); `test_template_memos_always_pass_the_guardrails` |
 | 17 | [ ] | LLM first-attempt pass | ≥ 0.80 | Not run: paid API out of scope |
 | 18 | [ ] | LLM pass after retries | ≥ 0.95 | Not run: paid API out of scope |
-| 19 | [x] | End-to-end time, template | ≤ 60 s | 9.5 s (8.9-10.1) per incident |
+| 19 | [x] | End-to-end time, template | ≤ 60 s | 11.2 s (10.3-12.0) per incident |
 
-Also measured, no target: false kpi_drop windows 0.14 per day (incident-free run); guided RCA is 2.6x **slower** in wall time than brute force (9.3 s vs 3.3 s median).
+Also measured, no target: false kpi_drop windows 0.14 per day (incident-free run); brute-force top-3 0.97; recall 1.00 in every visibility bin; guided RCA is 2.5x **slower** in wall time than brute force (10.1 s vs 4.1 s median).
 
 ## 5. Ablations (PLAN §5.3)
 
 | Done | ID | What | Result | Evidence |
 |---|---|---|---|---|
-| [x] | A1 | MiniLM vs LSA | P@5 0.91 vs 0.75 | `metrics.json`, retrieval per backend |
+| [x] | A1 | MiniLM vs LSA | P@5 0.91 vs 0.75; P@10 0.89 vs 0.80 | `summary.md`, "Retrieval" table |
 | [x] | A2 | M1 without the M0 offset | BR blamed 0.00 with offset; without it found 0.69, exact 0.57 | `metrics.json`, RCA no-offset |
 | [~] | A3 | Guided vs brute force + distractor attributes | Guided vs brute force done (2.8% of slices). **Distractors not run** | `metrics.json` says "not run (W5)" |
 | [ ] | A4 | LLM on raw table vs pipeline context | **Out of scope** (paid API). Raw-table arm not built | `metrics.json` says "not run (paid API; ...)"; free-model proposal in PLAN §5.3 |
@@ -120,10 +122,10 @@ Also measured, no target: false kpi_drop windows 0.14 per day (incident-free run
 | [x] | Research and references | All | `docs/RESEARCH.md`; some entries marked **[unverified]** |
 | [~] | Protected `main`, PR + review rule | A | Not verified on GitHub; both commits went straight to `main` |
 | [~] | Every reference verified at its source | All | Several **[unverified]** entries remain in RESEARCH.md |
-| [ ] | **README** | A | **Missing.** `pyproject.toml:8` points to `README.md`, so a fresh `pip install -e .` can fail; the Windows notes in PLAN §9 have nowhere to go |
-| [ ] | CI (GitHub Actions, windows-latest, Python 3.12) | A | No `.github/workflows/` |
+| [x] | README | A | `README.md`: setup, run, outputs, config, cost, layout, contributing, Windows notes; install steps checked on a clean copy (section 3). A newcomer still has to try it in W4 |
+| [~] | CI (GitHub Actions, windows-latest, Python 3.12) | A | `.github/workflows/ci.yml` written and its steps pass locally; first GitHub run pending the push |
 | [ ] | Project board, weekly sync | A | None found |
-| [ ] | AI-use log | All | No log file; required by PLAN §8 |
+| [x] | AI-use log | All | `docs/AI_USE_LOG.md` started, with the four AI-assisted sessions so far; each member adds their own rows |
 | [ ] | One explainer per member (W2) | All | None |
 | [ ] | Tagged release (W7 freeze) | A | `git tag` is empty |
 | [ ] | Held-out evaluation run (W7) | D | Not run; only dev seed 7 (and a seed-101 precision check) |
@@ -139,12 +141,12 @@ Week dates are not fixed yet (map back from the deadline). No week is closed.
 
 | Week | Exit check | A | B | C | D |
 |---|---|---|---|---|---|
-| W1 Set up | Everyone has run all commands | [~] repo yes; CI, board, AI log no | [ ] | [ ] | [ ] |
+| W1 Set up | Everyone has run all commands | [~] repo, README, CI file, AI log yes; board no | [ ] | [ ] | [ ] |
 | W2 Understand | Explainer + 2 tests each | [ ] | [ ] | [ ] | [ ] |
 | W3 Validate | Targets confirmed and frozen | [ ] adversarial tests | [ ] STL plots, MSTL rerun | [ ] M0 calibration, brute-force agreement | [ ] retrieval label sanity |
 | W4 Checkpoint 1 | Clean-clone reproduction by all | [ ] | [ ] | [ ] | [~] 20-scenario dev run exists (v1) |
 | W5 Extend | | [ ] | [ ] incident-free, red-team, distractor scenarios | [~] A2 runs (v1) | [~] A1, A5 run (v1) |
-| W6 Experiment | | [~] template guardrail run = 1.00 (v1) | [ ] recall by visibility | [ ] A3 scaling curve | [~] CIs in `evaluate` (v1) |
+| W6 Experiment | | [~] template guardrail run = 1.00 (v1) | [~] recall by visibility in `summary.md` (v1) | [ ] A3 scaling curve | [~] CIs in `evaluate` (v1) |
 | W7 Checkpoint 2 | Tag, frozen config, held-out numbers | [ ] | [ ] | [ ] | [ ] |
 | W8 Buffer | | [ ] | [ ] | [ ] | [ ] |
 | W9 Write | | [ ] | [ ] | [ ] | [ ] |
@@ -156,15 +158,14 @@ Week dates are not fixed yet (map back from the deadline). No week is closed.
 
 1. **Detection precision (B).** 21 of 56 kpi_drop windows match no incident: traffic and revenue dip together while conversion is normal. A conversion-only gate raised seed-101 precision to 0.89 with recall unchanged, but redefines kpi_drop. Team decision needed. Evidence: PLAN §5.5, "Detection precision miss".
 2. **RCA top-3 and brute-force gap (C).** Correlated or nested attributes (mobile within Android) drop out of the candidate list; this causes both the top-3 miss and the 8-point gap to brute force. Fix (score one-attribute extensions of the chosen slice) is described, not built. Evidence: PLAN §5.5, "RCA top-3 miss".
-3. **README missing (A).** Blocks the W4 clean-clone check and may break install.
-4. **Not built:** A3 distractor attributes; A4 raw-table arm; held-out run; lost-revenue ground truth.
-5. **Free LLM proposal (A, D).** Run A4 and the LLM guardrail runs on official free tiers through one OpenAI-compatible narrator. PLAN §5.3. Team decision needed.
+3. **Not built:** A3 distractor attributes; A4 raw-table arm; held-out run; lost-revenue ground truth.
+4. **Free LLM proposal (A, D).** Run A4 and the LLM guardrail runs on official free tiers through one OpenAI-compatible narrator. PLAN §5.3. Team decision needed.
 
 ## 10. Next steps by member
 
 | Member | Now (W1-W3) |
 |---|---|
-| **A, lead** | Write the README; add CI; set branch protection; start the AI-use log and board; table decisions 1 and 5; adversarial guardrail tests |
+| **A, lead** | Push and confirm the first green CI run; set branch protection; start the board; table decisions 1 and 4; adversarial guardrail tests |
 | **B, data and detection** | Run all commands; explainer + 2 tests; recommend on the precision gate; STL plots; STL vs MSTL rerun |
 | **C, RCA** | Run all commands; explainer + 2 tests; build and measure the top-3 fix; M0 calibration; brute-force agreement |
 | **D, retrieval and evaluation** | Run all commands; explainer + 2 tests; reproduce `metrics.json` from a clean clone; prepare A3 distractor runs |

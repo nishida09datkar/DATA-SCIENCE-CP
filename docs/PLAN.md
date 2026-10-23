@@ -116,7 +116,7 @@ Commands (install the `embeddings` and `dev` extras as the README describes; the
 .venv\Scripts\python -m kpi_rca generate --config config/default.yaml --out data
 .venv\Scripts\python -m kpi_rca run --data data --out outputs
 .venv\Scripts\python -m kpi_rca stream --data data
-.venv\Scripts\python -m kpi_rca evaluate --scenarios 20 --out outputs/evaluation
+.venv\Scripts\python -m kpi_rca evaluate --scenarios 20 --out outputs
 .venv\Scripts\python -m pytest
 ```
 
