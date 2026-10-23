@@ -2,10 +2,12 @@
 
 When an online shop's checkout conversion drops, this engine finds when it happened, which customer segment is responsible (for example Android users on app 5.4.0), which support tickets describe it, and writes a short incident memo with the lost revenue and next actions.
 
-Every number is computed deterministically. The memo text comes from a free template by default; an LLM narrator is optional, paid, and always checked by guardrails.
+Every number is computed deterministically. The memo text comes from a free template by default. An LLM narrator is optional (a free local model through Ollama, or the paid Claude API), and its drafts are always checked by guardrails.
 
 - Plan, methods and targets: [docs/PLAN.md](docs/PLAN.md)
 - Current progress and evidence: [docs/STATUS.md](docs/STATUS.md)
+- Full verification run (every command and number): [docs/VERIFICATION.md](docs/VERIFICATION.md)
+- Live demo script: [docs/DEMO.md](docs/DEMO.md)
 - References: [docs/RESEARCH.md](docs/RESEARCH.md)
 - AI-use log: [docs/AI_USE_LOG.md](docs/AI_USE_LOG.md)
 
@@ -29,7 +31,7 @@ Check the install:
 .venv\Scripts\python -m pytest
 ```
 
-All tests must pass. They need no network and no API key.
+All tests must pass (315 on 2026-10-23, about 3 minutes). They need no network and no API key.
 
 ## Run
 
@@ -43,11 +45,31 @@ All tests must pass. They need no network and no API key.
 # 3. Replay the KPIs hour by hour and report how fast each incident is detected
 .venv\Scripts\python -m kpi_rca stream --data data
 
-# 4. Benchmark on 20 random scenarios; writes outputs/evaluation/ (about 11 minutes)
+# 4. Benchmark on 20 random scenarios; writes outputs/evaluation/ (about 14 minutes)
 .venv\Scripts\python -m kpi_rca evaluate --scenarios 20 --out outputs
 ```
 
 Add `-v` before the command (`python -m kpi_rca -v run ...`) to log progress. Use `evaluate --quick` for a short smoke run.
+
+### Real data: REES46
+
+[REES46](https://www.kaggle.com/datasets/mkechinov/ecommerce-behavior-data-from-multi-category-store) is a real e-commerce event log. Download one monthly file into `data/external/rees46/` (git-ignored, for example `2019-Oct.csv.gz`). The mapping is in `src/kpi_rca/data/adapters.py`:
+- one session with a cart or purchase event is one checkout attempt;
+- a failure is a cart without a purchase;
+- the attributes are category, brand and price band.
+
+REES46 has no ticket text, so the memos cite no customers. It has no labelled incidents either; the script injects them into a copy of the data.
+
+```powershell
+# Score detection and RCA on the real month with 20 injected incidents; also export clean/ and injected/ data
+.venv\Scripts\python scripts\validate_rees46.py --month 2019-Oct --incidents 20 --export data/rees46
+
+# Run the pipeline on the real month, then on the copy with one injected incident
+.venv\Scripts\python -m kpi_rca run --config config/rees46.yaml --data data/rees46/clean --out outputs/rees46_run_clean
+.venv\Scripts\python -m kpi_rca run --config config/rees46.yaml --data data/rees46/injected --out outputs/rees46_run_injected
+```
+
+`generate` and `evaluate` refuse `config/rees46.yaml` (`dataset: external`), because there is no ground truth to generate or score against. The results are in [docs/VERIFICATION.md](docs/VERIFICATION.md), Phase 3.
 
 ### Outputs
 
@@ -70,23 +92,28 @@ All settings live in [config/default.yaml](config/default.yaml). Pass another fi
 ## Cost: free by default
 
 - The memo narrator is the free template (`llm.provider: template`).
+- `--narrator openai_compatible` is also free.
+  - It calls any OpenAI-compatible server at `llm.base_url`. The default is a local [Ollama](https://ollama.com) at `http://localhost:11434/v1`, with model `gemma3:1b` (`ollama pull gemma3:1b`).
+  - `LLM_BASE_URL` and `LLM_MODEL` override these. A server that needs a key reads it from `LLM_API_KEY`.
+  - A draft that fails the guardrails is retried, then replaced by the template memo.
 - `--narrator claude` (or `provider: claude`) calls the paid Anthropic API and needs `ANTHROPIC_API_KEY`. The team does not use it.
-- `evaluate` runs ablation A4 only with `--with-llm`, even when a key is set.
+- `evaluate` runs ablation A4 and the LLM guardrail criteria only with `--with-llm` (for example `--with-llm --narrator openai_compatible`), even when a key is set.
 - Keep any key in an environment variable or a git-ignored `.env`, never in a commit.
 
 ## Project layout
 
 ```text
 src/kpi_rca/
-  data/        generator.py (synthetic data), io.py (save, load, validate)
+  data/        generator.py (synthetic data), io.py (save, load, validate), adapters.py (REES46)
   detection/   kpi.py (hourly KPIs), detector.py (STL + IsolationForest), streaming.py
   rca/         segment_model.py (LightGBM M0/M1 + SHAP), search.py (guided), baseline.py (brute force)
   retrieval/   query.py, embeddings.py (MiniLM or LSA), index.py (FAISS)
   reporting/   impact.py, context.py, models.py, llm.py, guardrails.py, render.py
   evaluation.py, pipeline.py, cli.py, config.py, schemas.py
 tests/         one test file per module
-config/        default.yaml
-docs/          PLAN.md, STATUS.md, RESEARCH.md, AI_USE_LOG.md
+scripts/       validate_rees46.py (real data + injected incidents)
+config/        default.yaml, rees46.yaml
+docs/          PLAN.md, STATUS.md, VERIFICATION.md, DEMO.md, RESEARCH.md, AI_USE_LOG.md
 ```
 
 Stages talk to each other only through the types in `schemas.py` (PLAN §6).
