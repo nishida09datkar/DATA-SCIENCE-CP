@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -252,6 +253,8 @@ class ClaudeNarrator:
 # --- OpenAI-compatible (Ollama, llama.cpp, vLLM, free hosted tiers) ------------------------
 
 PAID_HOSTS = ("api.openai.com", "api.anthropic.com")  # refused: the product stays free
+RATE_LIMIT_RETRIES = 3  # free hosted tiers (e.g. Groq, 8K tokens per minute) answer 429 when busy
+RATE_LIMIT_WAIT_S = 60.0  # longest wait per 429; Retry-After is used when the server sends it
 JSON_INSTRUCTION = "\n\nReply with one JSON object and nothing else. It must match this JSON schema:\n{schema}"
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
@@ -270,12 +273,21 @@ class OpenAICompatibleNarrator:
     Base URL and model come from LLM_BASE_URL / LLM_MODEL, else from the config. The key,
     if the server needs one, is read from the variable named by cfg.api_key_env and only
     goes into the Authorization header: never logged, never in an error message.
-    `post` replaces the HTTP call in tests, so they need no network.
+    A 429 is waited out (Retry-After, at most RATE_LIMIT_WAIT_S) and resent up to
+    RATE_LIMIT_RETRIES times; every other HTTP error is final.
+    `post` and `sleep` replace the HTTP call and the wait in tests, so they need no network.
     """
 
     name = "openai_compatible"
 
-    def __init__(self, cfg: LLMConfig, post: Post | None = None, *, memo_max_words: int = DEFAULT_MEMO_MAX_WORDS):
+    def __init__(
+        self,
+        cfg: LLMConfig,
+        post: Post | None = None,
+        *,
+        memo_max_words: int = DEFAULT_MEMO_MAX_WORDS,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
         self.cfg = cfg
         self.base_url = (os.environ.get("LLM_BASE_URL") or cfg.base_url).rstrip("/")
         self.model = os.environ.get("LLM_MODEL") or cfg.openai_model
@@ -286,6 +298,7 @@ class OpenAICompatibleNarrator:
             raise ValueError(f"{host} is a paid API; the openai_compatible narrator is for free or local servers")
         self._api_key = os.environ.get(cfg.api_key_env) or None
         self.post = post or _http_post
+        self.sleep = sleep
         self.schema = MemoNarrative.model_json_schema()
         self.system_prompt = SYSTEM_PROMPT.format(
             headline_chars=HEADLINE_MAX_CHARS,
@@ -315,14 +328,7 @@ class OpenAICompatibleNarrator:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
-        try:
-            response = self.post(f"{self.base_url}/chat/completions", headers, body, self.cfg.timeout_s)
-        except urllib.error.HTTPError as exc:
-            raise NarratorError(_http_error(exc.code, self.model, self.cfg.api_key_env)) from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
-            raise NarratorError(f"could not reach {self.base_url} (connection error or timeout)") from exc
-        except ValueError as exc:  # json.JSONDecodeError
-            raise NarratorError("the server's reply was not JSON") from exc
+        response = self._send(headers, body)
 
         try:
             choice = response["choices"][0]
@@ -338,6 +344,32 @@ class OpenAICompatibleNarrator:
             return MemoNarrative.model_validate_json(content)
         except ValidationError as exc:
             raise InvalidMemoError("the output did not match the MemoNarrative schema", _schema_violations(exc)) from exc
+
+    def _send(self, headers: dict, body: dict) -> dict:
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            try:
+                return self.post(f"{self.base_url}/chat/completions", headers, body, self.cfg.timeout_s)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempt < RATE_LIMIT_RETRIES:
+                    self.sleep(_retry_after_s(exc))
+                    continue
+                if exc.code == 429:
+                    raise NarratorError(f"rate limit (429) still hit after {RATE_LIMIT_RETRIES} waits") from None
+                raise NarratorError(_http_error(exc.code, self.model, self.cfg.api_key_env)) from None
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                raise NarratorError(f"could not reach {self.base_url} (connection error or timeout)") from exc
+            except ValueError as exc:  # json.JSONDecodeError
+                raise NarratorError("the server's reply was not JSON") from exc
+        raise AssertionError("unreachable")
+
+
+def _retry_after_s(exc: urllib.error.HTTPError) -> float:
+    """Seconds to wait from the Retry-After header (in seconds), else RATE_LIMIT_WAIT_S; capped."""
+    try:
+        wait = float(exc.headers.get("retry-after")) if exc.headers is not None else RATE_LIMIT_WAIT_S
+    except (TypeError, ValueError):
+        wait = RATE_LIMIT_WAIT_S
+    return min(max(wait, 1.0), RATE_LIMIT_WAIT_S)
 
 
 def _http_error(status: int, model: str, key_env: str) -> str:

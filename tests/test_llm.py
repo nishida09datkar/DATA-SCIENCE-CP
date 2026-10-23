@@ -5,6 +5,7 @@ replays canned responses (or raises the SDK's own exceptions) and records
 every request it receives.
 """
 
+import email.message
 import json
 import urllib.error
 from datetime import datetime
@@ -19,6 +20,8 @@ from kpi_rca.config import LLMConfig, ReportingConfig
 from kpi_rca.reporting.context import build_incident_context
 from kpi_rca.reporting.guardrails import check_narrative
 from kpi_rca.reporting.llm import (
+    RATE_LIMIT_RETRIES,
+    RATE_LIMIT_WAIT_S,
     ClaudeNarrator,
     NarratorError,
     OpenAICompatibleNarrator,
@@ -558,7 +561,6 @@ def test_my_reporting_test_an_invented_number_ends_in_the_template_memo(clean_ll
     [
         (urllib.error.HTTPError("u", 401, "unauthorized", None, None), "authentication failed (401): check LLM_API_KEY"),
         (urllib.error.HTTPError("u", 404, "not found", None, None), "not found (404)"),
-        (urllib.error.HTTPError("u", 429, "slow down", None, None), "rate limit (429)"),
         (urllib.error.HTTPError("u", 500, "boom", None, None), "server error (500)"),
         (urllib.error.URLError("connection refused"), "could not reach"),
         (TimeoutError(), "could not reach"),
@@ -566,7 +568,7 @@ def test_my_reporting_test_an_invented_number_ends_in_the_template_memo(clean_ll
         (chat(None, refusal="I can't help with that."), "refused"),
         ({"error": "no choices"}, "no choices[0].message"),
     ],
-    ids=["401", "404", "429", "500", "connection", "timeout", "cut-off", "refusal", "malformed"],
+    ids=["401", "404", "500", "connection", "timeout", "cut-off", "refusal", "malformed"],
 )
 def test_openai_compatible_failures_fall_back_without_retrying(clean_llm_env, outcome, reason):
     post = FakePost(outcome)
@@ -574,6 +576,33 @@ def test_openai_compatible_failures_fall_back_without_retrying(clean_llm_env, ou
     assert len(post.calls) == 1
     assert narrative == TemplateNarrator().generate(make_context())
     assert report.fallback_used and reason in report.fallback_reason
+
+
+def rate_limited(retry_after=None):
+    headers = email.message.Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return urllib.error.HTTPError("u", 429, "slow down", headers, None)
+
+
+def test_openai_compatible_waits_out_a_429_and_resends(clean_llm_env):
+    post = FakePost(rate_limited("7"), rate_limited("not a number"), chat(as_json(GOOD)))
+    waits = []
+    narrator = OpenAICompatibleNarrator(OAI, post, sleep=waits.append)
+    narrative, report = narrate_with_guardrails(narrator, make_context(), OAI, CFG)
+    assert narrative == GOOD and report.passed and report.attempts == 1  # a 429 is not a failed draft
+    assert waits == [7.0, RATE_LIMIT_WAIT_S] and len(post.calls) == 3
+
+
+def test_openai_compatible_falls_back_when_the_429s_do_not_stop(clean_llm_env):
+    post = FakePost(*[rate_limited("600")] * (RATE_LIMIT_RETRIES + 1))
+    waits = []
+    narrator = OpenAICompatibleNarrator(OAI, post, sleep=waits.append)
+    narrative, report = narrate_with_guardrails(narrator, make_context(), OAI, CFG)
+    assert narrative == TemplateNarrator().generate(make_context())
+    assert report.fallback_used and "rate limit (429)" in report.fallback_reason
+    assert waits == [RATE_LIMIT_WAIT_S] * RATE_LIMIT_RETRIES  # Retry-After is capped
+    assert len(post.calls) == RATE_LIMIT_RETRIES + 1
 
 
 def test_openai_compatible_provider_is_opt_in(clean_llm_env):
