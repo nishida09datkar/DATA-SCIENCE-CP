@@ -531,6 +531,14 @@ def test_openai_compatible_refuses_paid_hosts_and_bad_urls(clean_llm_env, url):
         OpenAICompatibleNarrator(OAI.model_copy(update={"base_url": url}), FakePost())
 
 
+def test_openai_compatible_allows_only_free_models_on_openrouter(clean_llm_env):
+    router = OAI.model_copy(update={"base_url": "https://openrouter.ai/api/v1"})
+    with pytest.raises(ValueError, match=":free"):
+        OpenAICompatibleNarrator(router.model_copy(update={"openai_model": "nvidia/some-model"}), FakePost())
+    free = OpenAICompatibleNarrator(router.model_copy(update={"openai_model": "nvidia/some-model:free"}), FakePost())
+    assert free.base_url == "https://openrouter.ai/api/v1"
+
+
 def test_openai_compatible_strips_markdown_fences(clean_llm_env):
     post = FakePost(chat("```json\n" + as_json(GOOD) + "\n```"))
     assert OpenAICompatibleNarrator(OAI, post).generate(make_context()) == GOOD

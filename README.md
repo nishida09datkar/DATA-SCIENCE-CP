@@ -96,6 +96,8 @@ All settings live in [config/default.yaml](config/default.yaml). Pass another fi
   - It calls any OpenAI-compatible server at `llm.base_url`. The default is a local [Ollama](https://ollama.com) at `http://localhost:11434/v1`, with model `gemma3:1b` (`ollama pull gemma3:1b`).
   - `LLM_BASE_URL` and `LLM_MODEL` override these. A server that needs a key reads it from `LLM_API_KEY`.
   - Groq's free tier: get a key at [console.groq.com/keys](https://console.groq.com/keys), set `$env:GROQ_API_KEY`, and add `--config config/groq.yaml` (model `openai/gpt-oss-120b`). A rate-limit reply (429) is waited out and resent, up to 3 times.
+  - OpenRouter's free models: set `$env:OPENROUTER_API_KEY` and add `--config config/openrouter.yaml` (50 requests a day). Only model IDs ending in `:free` are accepted, so nothing is billed.
+  - A larger local model for a 6 GB GPU: `ollama pull gemma3:4b`, then `--config config/ollama_4b.yaml`.
   - A draft that fails the guardrails is retried, then replaced by the template memo.
 - `--narrator claude` (or `provider: claude`) calls the paid Anthropic API and needs `ANTHROPIC_API_KEY`. The team does not use it.
 - `evaluate` runs ablation A4 and the LLM guardrail criteria only with `--with-llm` (for example `--with-llm --narrator openai_compatible`), even when a key is set.
@@ -113,7 +115,7 @@ src/kpi_rca/
   evaluation.py, pipeline.py, cli.py, config.py, schemas.py
 tests/         one test file per module
 scripts/       validate_rees46.py (real data + injected incidents)
-config/        default.yaml, rees46.yaml, groq.yaml
+config/        default.yaml, rees46.yaml, groq.yaml, openrouter.yaml, ollama_4b.yaml
 docs/          PLAN.md, STATUS.md, VERIFICATION.md, DEMO.md, RESEARCH.md, AI_USE_LOG.md
 ```
 

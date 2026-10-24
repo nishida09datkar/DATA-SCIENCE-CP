@@ -1,0 +1,17 @@
+# OpenRouter free models as the memo narrator (OpenAI-compatible API); merged over the defaults.
+# Key: https://openrouter.ai/settings/keys. Put it in the environment, never in this file:
+#   $env:OPENROUTER_API_KEY = "..."   (PowerShell, this session only)
+# Then:
+#   .venv\Scripts\python -m kpi_rca run --config config/openrouter.yaml --data data --out outputs/run_openrouter
+#   .venv\Scripts\python -m kpi_rca evaluate --config config/openrouter.yaml --scenarios 20 --with-llm --out outputs/openrouter
+# Free models allow 20 requests per minute and 50 per day (an evaluation needs up to 30).
+# Only model IDs ending in ':free' are accepted (reporting/llm.py), so nothing is billed.
+# Free providers may log prompts: send synthetic data only.
+
+llm:
+  provider: openai_compatible
+  base_url: https://openrouter.ai/api/v1
+  openai_model: nvidia/nemotron-3-super-120b-a12b:free  # supports structured outputs on OpenRouter
+  api_key_env: OPENROUTER_API_KEY
+  response_format: json_schema
+  max_tokens: 4000

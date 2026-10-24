@@ -253,6 +253,7 @@ class ClaudeNarrator:
 # --- OpenAI-compatible (Ollama, llama.cpp, vLLM, free hosted tiers) ------------------------
 
 PAID_HOSTS = ("api.openai.com", "api.anthropic.com")  # refused: the product stays free
+FREE_SUFFIX_HOSTS = ("openrouter.ai",)  # mixed free/paid catalogues: only ':free' model IDs are allowed
 RATE_LIMIT_RETRIES = 3  # free hosted tiers (e.g. Groq, 8K tokens per minute) answer 429 when busy
 RATE_LIMIT_WAIT_S = 60.0  # longest wait per 429; Retry-After is used when the server sends it
 JSON_INSTRUCTION = "\n\nReply with one JSON object and nothing else. It must match this JSON schema:\n{schema}"
@@ -296,6 +297,8 @@ class OpenAICompatibleNarrator:
             raise ValueError(f"llm.base_url is not a URL: '{self.base_url}'")
         if any(host == h or host.endswith("." + h) for h in PAID_HOSTS):
             raise ValueError(f"{host} is a paid API; the openai_compatible narrator is for free or local servers")
+        if any(host == h or host.endswith("." + h) for h in FREE_SUFFIX_HOSTS) and not self.model.endswith(":free"):
+            raise ValueError(f"'{self.model}' on {host} may be billed; use a model ID that ends in ':free'")
         self._api_key = os.environ.get(cfg.api_key_env) or None
         self.post = post or _http_post
         self.sleep = sleep
