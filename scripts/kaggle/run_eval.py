@@ -49,7 +49,7 @@ sh("git log -1 --oneline", cwd=SRC)
 
 # Project: Python 3.12 and the locked dependencies (on Linux, PyPI torch is the CUDA build).
 sh("curl -LsSf https://astral.sh/uv/install.sh | sh")
-uv = os.path.expanduser("~/.local/bin/uv")
+uv = shutil.which("uv") or os.path.expanduser("~/.local/bin/uv")  # root installs to /usr/local/bin
 sh(f"{uv} sync --locked --extra dev --extra embeddings", cwd=SRC)
 python = f"{SRC}/.venv/bin/python"
 
