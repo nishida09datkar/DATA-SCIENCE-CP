@@ -119,7 +119,7 @@ def slice_stats(
     cfg: RCAConfig,
 ) -> SliceStats:
     """Score one slice from its sums (shared by the SHAP search and the brute force)."""
-    ep = excess / total_excess
+    ep = excess / total_excess if total_excess > 0 else 0.0
     purity = excess / expected_success if expected_success > 0 else 0.0
     score = 2.0 * ep * purity / (ep + purity) if ep > 0 and purity > 0 else 0.0
     return SliceStats(
@@ -158,12 +158,12 @@ def choose_slice(candidates: Iterable[SliceStats], cfg: RCAConfig, n_tests: int)
 class SliceEvaluator:
     """Scores slices of one window; ``active`` marks the rows no earlier finding explained."""
 
-    def __init__(self, data: WindowData, p0: np.ndarray, cfg: RCAConfig):
+    def __init__(self, data: WindowData, p0: np.ndarray, cfg: RCAConfig, total_excess: float | None = None):
         self.data = data
         self.cfg = cfg
         self.p0 = p0
         self.excess = data.y_window - p0
-        self.total_excess = float(self.excess.sum())
+        self.total_excess = total_excess if total_excess is not None else float(self.excess.sum())
         self.evaluated = 0
 
     def window_mask(self, items: Items, active: np.ndarray) -> np.ndarray:
@@ -233,6 +233,62 @@ def mine_patterns(data: WindowData, rows: np.ndarray, phi: np.ndarray, cfg: RCAC
             counts[tuple(zip(attrs, (int(v) for v in value)))] = int(f)
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], len(kv[0]), kv[0]))
     return [items for items, _ in ranked[: cfg.top_k_patterns]]
+
+
+def extend_candidates(
+    candidates: list[SliceStats],
+    ev: SliceEvaluator,
+    active: np.ndarray,
+    cfg: RCAConfig,
+    max_promising: int = 5,
+) -> list[SliceStats]:
+    """Greedily extend top candidates with single correlated/nested attributes.
+
+    When SHAP attribution is split across correlated or nested attributes, one of
+    the attributes may fall below the individual threshold in mine_patterns.
+    This step takes the most promising candidate slices and evaluates 1-attribute
+    extensions S union {A=v}, where v is the most frequent category code among
+    active window failure rows in S.
+    """
+    promising = [
+        s for s in candidates
+        if s.score > 0 and s.n_window >= cfg.min_segment_rows and len(s.items) < cfg.max_order
+    ]
+    if not promising:
+        return []
+
+    promising.sort(key=lambda s: -s.score)
+    promising = promising[:max_promising]
+
+    seen_items = {s.items for s in candidates}
+    extensions: list[SliceStats] = []
+    n_attr = ev.data.window_codes.shape[1]
+
+    for s in promising:
+        current_attrs = {a for a, _ in s.items}
+        s_mask = ev.window_mask(s.items, active)
+        target_mask = s_mask & (ev.data.y_window == 1)
+        if not target_mask.any():
+            target_mask = s_mask
+        if not target_mask.any():
+            continue
+
+        for a in range(n_attr):
+            if a in current_attrs:
+                continue
+            codes = ev.data.window_codes[target_mask, a]
+            if len(codes) == 0:
+                continue
+            vals, counts = np.unique(codes, return_counts=True)
+            best_code = int(vals[np.argmax(counts)])
+            ext_items = tuple(sorted(s.items + ((a, best_code),)))
+
+            if ext_items not in seen_items:
+                seen_items.add(ext_items)
+                stat = ev.evaluate(ext_items, active)
+                extensions.append(stat)
+
+    return extensions
 
 
 def prune_slice(chosen: SliceStats, ev: SliceEvaluator, active: np.ndarray, n_tests: int) -> SliceStats:
@@ -326,14 +382,37 @@ def analyze_window(
 
     m0 = fit_baseline_model(data, cfg) if use_offset else None
     p0 = baseline_failure_probability(data, m0, cfg, use_offset=use_offset)
-    ev = SliceEvaluator(data, p0, cfg)
-    if ev.total_excess <= 0 or data.y_window.min() == data.y_window.max():
-        log.info("rca: %s has no excess failures (E=%.1f); no findings", window.window_id, ev.total_excess)
+
+    if data.y_window.min() == data.y_window.max():
+        log.info("rca: %s all window attempts have identical outcome; no findings", window.window_id)
         return empty_result(window, "shap_search", started)
 
     m1 = fit_change_model(data, p0, cfg, use_offset=use_offset)
     margin = change_margin(m1, data)
     pushed_up = np.flatnonzero((data.y_window == 1) & (margin > 0))
+    if len(pushed_up) == 0:
+        log.info("rca: %s has no failures elevated by M1; no findings", window.window_id)
+        return empty_result(window, "shap_search", started)
+
+    raw_total = float((data.y_window - p0).sum())
+    if raw_total > 0:
+        total_excess = raw_total
+    else:
+        # Negative global excess (e.g. macro drift where general failure rate dropped
+        # while a localized segment spiked). Use positive excess from rows elevated by M1 (margin > 0).
+        elevated = (margin > 0)
+        elevated_excess = float((data.y_window - p0)[elevated].sum())
+        pushed_excess = float((data.y_window - p0)[pushed_up].sum())
+        total_excess = max(elevated_excess, pushed_excess, 1.0)
+        log.info(
+            "rca: %s negative window excess (E_raw=%.1f); using elevated excess (E_eff=%.1f)",
+            window.window_id,
+            raw_total,
+            total_excess,
+        )
+
+    ev = SliceEvaluator(data, p0, cfg, total_excess=total_excess)
+
     mined = pushed_up[np.argsort(-margin[pushed_up], kind="stable")[: cfg.shap_max_rows]]
     mined_phi = shap_values(m1, data, mined)
 
@@ -345,10 +424,12 @@ def analyze_window(
         if not patterns:
             break
         candidates = [ev.evaluate(items, active) for items in patterns]
-        chosen = choose_slice(candidates, cfg, n_tests=len(candidates))
+        extensions = extend_candidates(candidates, ev, active, cfg)
+        all_candidates = candidates + extensions
+        chosen = choose_slice(all_candidates, cfg, n_tests=len(all_candidates))
         if chosen is None:
             break
-        chosen = prune_slice(chosen, ev, active, n_tests=len(candidates))
+        chosen = prune_slice(chosen, ev, active, n_tests=len(all_candidates))
         mask = ev.window_mask(chosen.items, active)
         findings.append(make_finding(len(findings) + 1, chosen, mask, data, m1, cfg))
         active &= ~mask
