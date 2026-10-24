@@ -4,6 +4,7 @@
     run       the full pipeline on a data directory; prints every memo
     stream    replay the KPIs bucket by bucket; prints alerts and the delay per known incident
     evaluate  the randomised benchmark (PLAN section 5); writes outputs/evaluation/
+    dashboard an offline HTML page over a run, the benchmark and REES46; writes outputs/dashboard/
 
 Every command returns an exit code instead of raising: 0 = success, 2 = a problem with
 the input (bad config, missing data directory, Claude requested without credentials).
@@ -90,6 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
                    "openai_compatible narrator when llm.provider is openai_compatible (free with a local server)")
     p.add_argument("--narrator", choices=["claude", "openai_compatible"], default=None,
                    help="override llm.provider for --with-llm (openai_compatible: llm.base_url, a local Ollama by default)")
+
+    p = commands.add_parser("dashboard", help="build an offline HTML dashboard from a run (open its index.html)")
+    add_config(p)
+    p.add_argument("--data-dir", "--data", dest="data_dir", type=Path, default=DEFAULT_DATA_DIR)
+    p.add_argument("--run", dest="run_dir", type=Path, default=DEFAULT_OUT_DIR / "run_template",
+                   help="a directory written by `run` (default outputs/run_template)")
+    p.add_argument("--outputs", dest="outputs_root", type=Path, default=DEFAULT_OUT_DIR,
+                   help="where to look for evaluation/ and rees46/ results (default outputs)")
+    p.add_argument("--out-dir", "--out", dest="out_dir", type=Path, default=DEFAULT_OUT_DIR / "dashboard")
     return parser
 
 
@@ -105,7 +115,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         return fail(str(exc))
 
-    handlers = {"generate": cmd_generate, "run": cmd_run, "stream": cmd_stream, "evaluate": cmd_evaluate}
+    handlers = {
+        "generate": cmd_generate, "run": cmd_run, "stream": cmd_stream, "evaluate": cmd_evaluate, "dashboard": cmd_dashboard,
+    }
     return handlers[args.command](args, cfg)
 
 
@@ -236,4 +248,19 @@ def cmd_evaluate(args: argparse.Namespace, cfg: AppConfig) -> int:
     )
     echo(result.summary_markdown)
     echo(f"written: {', '.join(str(p) for p in result.paths.values())}")
+    return EXIT_OK
+
+
+def cmd_dashboard(args: argparse.Namespace, cfg: AppConfig) -> int:
+    from kpi_rca.dashboard import build_dashboard
+
+    problem = _check_data_dir(args.data_dir)
+    if problem:
+        return fail(problem)
+    try:
+        index = build_dashboard(cfg, args.data_dir, args.run_dir, args.out_dir, outputs_root=args.outputs_root)
+    except ValueError as exc:  # no run summary, or unreadable data files
+        return fail(str(exc))
+    echo(f"dashboard: {index.resolve()}")
+    echo("open it in a browser; it needs no server or network")
     return EXIT_OK

@@ -90,7 +90,34 @@ Same 20 scenarios (dev seed 7), same 10 memo contexts, guardrails unchanged:
 - dots-3 is a reasoning model. At `max_tokens: 4000` both memos of the default `run` stopped at `finish_reason=length` and fell back; at 16000 with `effort: low` both passed (one on attempt 2).
 - `nvidia/nemotron-3-super-120b-a12b:free`, the first OpenRouter choice, answered 404 from its provider (Nvidia); two other free models answered 502 and 429.
 - The OpenRouter run hit 429 twice; both were waited out (`reporting/llm.py`, `_send`).
-- 10 memos is a small sample: one memo moves a rate by 10 points. The memo count is now `evaluation.a4_max_memos` (default 10); a 50-memo run with `gemma3:27b` on a free Kaggle 2x T4 is set up in `scripts/kaggle/`.
+- 10 memos is a small sample: one memo moves a rate by 10 points. The memo count is now `evaluation.a4_max_memos` (default 10); the 50-memo run is the next subsection.
+
+### 100 scenarios and 50 gemma3:27b memos on Kaggle (2026-10-24)
+
+A private Kaggle script kernel on the free GPU T4 x2 clones `ticket-reporting` (`c7702f0`), installs the locked dependencies with uv, starts Ollama and pulls `gemma3:27b`:
+
+```powershell
+kaggle kernels push -p scripts/kaggle                                   # version 2; version 1 failed: uv was not at ~/.local/bin
+kaggle kernels status aditya32211/kpi-rca-gemma3-27b-eval              # RUNNING 12:00, COMPLETE 14:17
+kaggle kernels output aditya32211/kpi-rca-gemma3-27b-eval -p outputs/kaggle_27b
+```
+
+Inside the kernel: `python -m kpi_rca -v evaluate --config config/kaggle_27b.yaml --scenarios 100 --with-llm --out /kaggle/working/outputs`, 7,624 s. `ollama_ps.txt` shows `gemma3:27b  18 GB  100% GPU` before and after the run.
+
+| Result | 100 scenarios | 20 scenarios |
+|---|---|---|
+| Incidents (detected) | 159 (155) | 35 (35) |
+| Detection recall / precision / F1 | 0.97 / 0.52 / 0.68 | 1.00 / 0.62 / 0.77 |
+| Surges labelled kpi_drop | 0.02 | 0.00 |
+| RCA guided exact / top-3 / row Jaccard | 0.92 / 0.93 / 0.98 | 0.86 / 0.89 / 0.94 |
+| RCA brute force exact | 0.98 | 0.94 |
+| BR blamed (guided) | 0.01 (scenario 87, INC-01, in a later finding) | 0.00 |
+| Retrieval P@5 MiniLM / LSA | 0.90 / 0.78 | 0.91 / 0.75 |
+| Lost revenue mean relative error | +0.11 (0.04 to 0.17) | +0.01 (−0.08 to 0.10) |
+| LLM first-attempt / after retries / fallback | 0.90 / 0.98 / 0.02 (`gemma3:27b`, 50 memos, median 51 s) | 0.80 / 1.00 / 0.00 (dots-3, 10 memos) |
+| End-to-end per incident, template | 15.6 s | 14.2 s |
+
+The first 20 of the 100 scenarios are the 20-scenario run (same seed, same 35 incidents).
 
 ## Phase 2: ticket retrieval and reporting (member A)
 
@@ -286,12 +313,14 @@ CI: `.github/workflows/ci.yml` exists (`uv sync --locked --extra dev`, then pyte
 
 | # | Miss | Number | Owner | State |
 |---|---|---|---|---|
-| 1 | Detection precision | 0.62 vs ≥ 0.80 | B | Conversion-only gate proposed (seed 101: 0.89); team decision |
-| 2 | Detection F1 | 0.77 vs ≥ 0.85 | B | Follows from 1 |
-| 3 | RCA top-3 | 0.89 vs ≥ 0.90 (one incident) | C | One-attribute extension fix described, not built |
-| 4 | Guided vs brute-force exact gap | 8 points vs ≤ 5 | C | Same cause as 3 |
-| 5 | LLM first-attempt pass | 0.00 vs ≥ 0.80 (gemma3:1b, local) | A | Met on 2026-10-24: 0.80 with OpenRouter free dots-3 (10 memos); 50-memo Kaggle run next |
-| 6 | LLM pass after retries | 0.20 vs ≥ 0.95 | A | Met on 2026-10-24: 1.00 with dots-3; the template fallback keeps memos compliant either way |
+| 1 | Detection precision | 0.62 vs ≥ 0.80 (0.52 on 100 scenarios) | B | Conversion-only gate proposed (seed 101: 0.89); team decision |
+| 2 | Detection F1 | 0.77 vs ≥ 0.85 (0.68 on 100) | B | Follows from 1 |
+| 3 | RCA top-3 | 0.89 vs ≥ 0.90 (one incident) | C | Met on 100 scenarios (0.93); one-attribute extension fix described, not built |
+| 4 | Guided vs brute-force exact gap | 8 points vs ≤ 5 (6 on 100) | C | Same cause as 3 |
+| 5 | LLM first-attempt pass | 0.00 vs ≥ 0.80 (gemma3:1b, local) | A | Met on 2026-10-24: 0.80 with OpenRouter free dots-3 (10 memos), 0.90 with gemma3:27b on Kaggle (50 memos) |
+| 6 | LLM pass after retries | 0.20 vs ≥ 0.95 | A | Met on 2026-10-24: 1.00 with dots-3, 0.98 with gemma3:27b; the template fallback keeps memos compliant either way |
+| 6a | Surge labelled kpi_drop | 0.02 vs 0 on 100 scenarios (0.00 on 20) | B | New on 100 scenarios; not investigated |
+| 6b | BR blamed | 0.01 vs 0 on 100 scenarios (1 of 155: scenario 87, INC-01) | C | New on 100 scenarios; top finding right, BR in a later finding; not investigated |
 | 7 | Streaming F1 | not measured | B, D | Needs `stream_mode: full` |
 | 8 | REES46 detection recall | 0.30 (0/10 for injected drops with z above −5) | B | Heavy-tailed real data (STATUS open issue 6); no target set for REES46 |
 | 9 | REES46 lost revenue | −65% (USD 78,383 vs 221,918) on the injected apple incident | A | Window-wide order value; a segment-level order value would fix it; not built |

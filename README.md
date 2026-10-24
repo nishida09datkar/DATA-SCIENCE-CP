@@ -31,7 +31,7 @@ Check the install:
 .venv\Scripts\python -m pytest
 ```
 
-All tests must pass (318 on 2026-10-24, about 3 minutes). They need no network and no API key.
+All tests must pass (323 on 2026-10-24, about 3 minutes). They need no network and no API key.
 
 ## Run
 
@@ -47,9 +47,26 @@ All tests must pass (318 on 2026-10-24, about 3 minutes). They need no network a
 
 # 4. Benchmark on 20 random scenarios; writes outputs/evaluation/ (about 14 minutes)
 .venv\Scripts\python -m kpi_rca evaluate --scenarios 20 --out outputs
+
+# 5. Build the dashboard over the run from step 2, then open it
+.venv\Scripts\python -m kpi_rca dashboard --run outputs
+start outputs\dashboard\index.html
 ```
 
 Add `-v` before the command (`python -m kpi_rca -v run ...`) to log progress. Use `evaluate --quick` for a short smoke run.
+
+### Dashboard
+
+`dashboard` writes one static page, `outputs/dashboard/index.html`, that opens from disk with no server and no network (ECharts, Lucide and Inter are vendored). It has four pages:
+
+| Page | Shows | Needs |
+|---|---|---|
+| Overview | Conversion against expected, the gap in pp with each window labelled, and the incident list | a `run` directory (`--run`, default `outputs/run_template`) |
+| Incidents | Impact, a zoomed timeline, segment failure rates, SHAP, error codes, tickets, guardrail checks, actions | the same run |
+| Benchmark | Targets met, memo pass rate by narrator, every metric's mean and 95% CI against its target | `outputs/evaluation/` from `evaluate` (optional) |
+| Real data | Injected REES46 incidents, detected vs missed, by how far they moved total conversion | `outputs/rees46/<month>/` from `validate_rees46.py` (optional) |
+
+A page whose results are missing says which command produces them. The "Answer key" switch shows or hides the generator's ground truth, which the pipeline never reads. Rebuild after any new run.
 
 ### Real data: REES46
 
@@ -82,6 +99,7 @@ REES46 has no ticket text, so the memos cite no customers. It has no labelled in
 | `outputs/evaluation/metrics.json` | `evaluate` | Every metric with 95% bootstrap CIs |
 | `outputs/evaluation/summary.md` | `evaluate` | Results table against the PLAN §5.4 targets |
 | `outputs/evaluation/scenarios.csv` | `evaluate` | One row per injected incident |
+| `outputs/dashboard/index.html` | `dashboard` | The offline dashboard (with `data.js` and the vendored libraries beside it) |
 
 `data/` and `outputs/` are git-ignored; regenerate them with the commands above.
 
@@ -113,6 +131,7 @@ src/kpi_rca/
   rca/         segment_model.py (LightGBM M0/M1 + SHAP), search.py (guided), baseline.py (brute force)
   retrieval/   query.py, embeddings.py (MiniLM or LSA), index.py (FAISS)
   reporting/   impact.py, context.py, models.py, llm.py, guardrails.py, render.py
+  dashboard/   build.py (collects run, benchmark and REES46 results), static/ (page, styles, vendored libraries)
   evaluation.py, pipeline.py, cli.py, config.py, schemas.py
 tests/         one test file per module
 scripts/       validate_rees46.py (real data + injected incidents), kaggle/ (gemma3:27b evaluation on a free Kaggle GPU)

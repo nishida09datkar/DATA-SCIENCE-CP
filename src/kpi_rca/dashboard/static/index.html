@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KPI RCA dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111827'/%3E%3Cpath d='M6 20l6-6 5 5 9-10' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Navigation">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">KR</span>
+        <div>
+          <div class="brand-name">KPI RCA</div>
+          <div class="brand-sub">Checkout monitoring</div>
+        </div>
+      </div>
+      <nav class="nav" id="nav">
+        <a class="nav-item" href="#overview" data-view="overview"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>
+        <a class="nav-item" href="#incident" data-view="incident"><i data-lucide="siren"></i><span>Incidents</span><span class="nav-count" id="nav-incidents"></span></a>
+        <a class="nav-item" href="#benchmark" data-view="benchmark"><i data-lucide="flask-conical"></i><span>Benchmark</span></a>
+        <a class="nav-item" href="#realdata" data-view="realdata"><i data-lucide="database"></i><span>Real data</span></a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="run-card" id="run-card"></div>
+        <button class="btn btn-ghost theme-btn" type="button" id="theme-toggle"><i data-lucide="sun-moon"></i><span>Theme: auto</span></button>
+      </div>
+    </aside>
+
+    <div class="content">
+      <header class="topbar">
+        <div class="crumbs" id="crumbs"></div>
+        <div class="top-actions">
+          <label class="switch" title="Overlay the generator's answer key (the pipeline never reads it)">
+            <input type="checkbox" id="answer-key" checked>
+            <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+            <span class="switch-label">Answer key</span>
+          </label>
+          <span class="status-chip" id="status-chip"></span>
+        </div>
+      </header>
+      <main id="main" tabindex="-1"></main>
+      <footer class="foot" id="footer"></footer>
+    </div>
+  </div>
+
+  <script src="vendor/echarts.min.js"></script>
+  <script src="vendor/lucide.min.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
