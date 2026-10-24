@@ -54,8 +54,8 @@ Every accuracy number equals the 2026-10-15 and earlier 2026-10-23 runs. The 2,2
 | 14 | Retrieval P@5, LSA | ≥ 0.60 | 0.75 (0.69-0.81) | yes |
 | 15 | R@10 reported with its cap | report | MiniLM 0.48 (cap 0.54), LSA 0.43 (cap 0.54) | yes |
 | 16 | Final memos compliant | 1.00 | 1.00 (template; every memo, including LLM fallbacks, passes) | yes |
-| 17 | LLM first-attempt pass | ≥ 0.80 | **0.00** (0/10), gemma3:1b via local Ollama | **MISS** (new; was "not run") |
-| 18 | LLM pass after retries | ≥ 0.95 | **0.20** (2/10); 0.80 fell back to the template | **MISS** (new; was "not run") |
+| 17 | LLM first-attempt pass | ≥ 0.80 | **0.00** (0/10), gemma3:1b via local Ollama. Rerun 2026-10-24: 0.80 with OpenRouter free dots-3 (see "LLM narrators compared") | **MISS** on 2026-10-23; met on 2026-10-24 |
+| 18 | LLM pass after retries | ≥ 0.95 | **0.20** (2/10); 0.80 fell back to the template. Rerun 2026-10-24: 1.00 with dots-3 | **MISS** on 2026-10-23; met on 2026-10-24 |
 | 19 | End-to-end time, template | ≤ 60 s | 14.2 s (13.2-15.2) per incident | yes |
 
 Known misses, as AGENT_PLAN asked:
@@ -70,7 +70,27 @@ Also measured, no target:
 Criteria 17-18 need a word of context:
 - The model is a 1-billion-parameter local model, the only free LLM option on this laptop.
 - The guardrails rejected 8 of 10 memos even after 2 retries; in each case the template memo was used, so no unchecked text reached a memo. Criterion 16 holds.
-- A larger free model (for example a free-tier API) may do better. That run needs a team decision and a key (STATUS open issue 4).
+- A larger free model may do better; measured on 2026-10-24 below.
+
+### LLM narrators compared (2026-10-24)
+
+Same 20 scenarios (dev seed 7), same 10 memo contexts, guardrails unchanged:
+
+```powershell
+.venv\Scripts\python -m kpi_rca evaluate --config config/openrouter.yaml --scenarios 20 --with-llm --out outputs/openrouter   # key in OPENROUTER_API_KEY
+.venv\Scripts\python -m kpi_rca evaluate --config config/ollama_4b.yaml --scenarios 20 --with-llm --out outputs/ollama_4b
+```
+
+| Narrator | Where | First-attempt pass (17) | Pass after retries (18) | Fallback | Median s per memo |
+|---|---|---|---|---|---|
+| `dots-studio/dots-3-note-preview:free` | OpenRouter free tier | **0.80** | **1.00** | 0.00 | 68 |
+| `gemma3:4b` | local Ollama 0.40.10, RTX 3050 6 GB (`ollama ps`: 100% GPU) | 0.40 | 0.60 | 0.40 | 28 |
+| `gemma3:1b` | local Ollama (2026-10-23) | 0.00 | 0.20 | 0.80 | n/a |
+
+- dots-3 is a reasoning model. At `max_tokens: 4000` both memos of the default `run` stopped at `finish_reason=length` and fell back; at 16000 with `effort: low` both passed (one on attempt 2).
+- `nvidia/nemotron-3-super-120b-a12b:free`, the first OpenRouter choice, answered 404 from its provider (Nvidia); two other free models answered 502 and 429.
+- The OpenRouter run hit 429 twice; both were waited out (`reporting/llm.py`, `_send`).
+- 10 memos is a small sample: one memo moves a rate by 10 points. The memo count is now `evaluation.a4_max_memos` (default 10); a 50-memo run with `gemma3:27b` on a free Kaggle 2x T4 is set up in `scripts/kaggle/`.
 
 ## Phase 2: ticket retrieval and reporting (member A)
 
@@ -270,8 +290,8 @@ CI: `.github/workflows/ci.yml` exists (`uv sync --locked --extra dev`, then pyte
 | 2 | Detection F1 | 0.77 vs ≥ 0.85 | B | Follows from 1 |
 | 3 | RCA top-3 | 0.89 vs ≥ 0.90 (one incident) | C | One-attribute extension fix described, not built |
 | 4 | Guided vs brute-force exact gap | 8 points vs ≤ 5 | C | Same cause as 3 |
-| 5 | LLM first-attempt pass | 0.00 vs ≥ 0.80 (gemma3:1b, local) | A | Only a 1B local model was available; free-tier API run needs a decision and key |
-| 6 | LLM pass after retries | 0.20 vs ≥ 0.95 | A | As 5; the template fallback keeps memos compliant |
+| 5 | LLM first-attempt pass | 0.00 vs ≥ 0.80 (gemma3:1b, local) | A | Met on 2026-10-24: 0.80 with OpenRouter free dots-3 (10 memos); 50-memo Kaggle run next |
+| 6 | LLM pass after retries | 0.20 vs ≥ 0.95 | A | Met on 2026-10-24: 1.00 with dots-3; the template fallback keeps memos compliant either way |
 | 7 | Streaming F1 | not measured | B, D | Needs `stream_mode: full` |
 | 8 | REES46 detection recall | 0.30 (0/10 for injected drops with z above −5) | B | Heavy-tailed real data (STATUS open issue 6); no target set for REES46 |
 | 9 | REES46 lost revenue | −65% (USD 78,383 vs 221,918) on the injected apple incident | A | Window-wide order value; a segment-level order value would fix it; not built |

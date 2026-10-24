@@ -1,6 +1,6 @@
 # Project Status: KPI Root-Cause Analysis Engine
 
-As of 2026-10-24, branch `ticket-reporting` (not yet pushed or merged; `main` is at `a5cc842`). Measured numbers below are from 2026-10-23, code commit `c66ed09`; the 2026-10-24 commits add free narrator configs and 429 handling in `reporting/llm.py`, which no measured number depends on (open issue 4). Scope and targets: [PLAN.md](PLAN.md). References: [RESEARCH.md](RESEARCH.md). Full verification run of AGENT_PLAN phases 0-4, with every command: [VERIFICATION.md](VERIFICATION.md). Demo script: [DEMO.md](DEMO.md).
+As of 2026-10-24, branch `ticket-reporting` (not yet pushed or merged; `origin/main` is at `4a010e2`). Measured numbers below are from 2026-10-23, code commit `c66ed09`, except criteria 17-18 and A4, measured on 2026-10-24 with free narrator configs (open issue 4). Scope and targets: [PLAN.md](PLAN.md). References: [RESEARCH.md](RESEARCH.md). Full verification run of AGENT_PLAN phases 0-4, with every command: [VERIFICATION.md](VERIFICATION.md). Demo script: [DEMO.md](DEMO.md).
 
 **Legend:** `[x]` done, with evidence · `[~]` partly done · `[ ]` not started · **MISS** = built and measured, but the target is not met.
 **Evidence** means something a team member can open or rerun: a file and line, a named test, or a command plus the output file it writes.
@@ -10,16 +10,16 @@ As of 2026-10-24, branch `ticket-reporting` (not yet pushed or merged; `main` is
 | Area | Done | Partial | Not started / missed | Progress |
 |---|---|---|---|---|
 | [2. Code modules](#2-code-modules) | 21 / 21 | 0 | 0 | 100% |
-| [3. Tests](#3-tests) | 317 passing, 15 files | | | Done |
-| [4. Success criteria](#4-success-criteria-plan-54) | 12 / 19 met | | 6 missed, 1 not measured | 63% |
+| [3. Tests](#3-tests) | 318 passing, 15 files | | | Done |
+| [4. Success criteria](#4-success-criteria-plan-54) | 14 / 19 met | | 4 missed, 1 not measured | 74% |
 | [5. Ablations](#5-ablations-plan-53) | 3 / 5 | 2 (A3, A4 context arm) | 0 | 80% |
 | [6. Design review notes](#6-design-review-notes-plan-end) | 4 / 8 | 3 | 1 | 69% |
-| [7. Project deliverables](#7-project-deliverables-plan-8-and-10) | 5 / 18 | 4 | 9 | 39% |
+| [7. Project deliverables](#7-project-deliverables-plan-8-and-10) | 6 / 18 | 3 | 9 | 42% |
 | [8. Timeline W1-W10](#8-timeline-w1-w10-plan-7) | 0 / 10 weeks closed | W4 (D) and W5-W6 (D) work exists from v1 | | W1 not yet closed |
 
 Short version:
 - The **software is built and tested**.
-- The **numbers exist for the dev seed**. Six targets are missed: the four known ones, plus the two LLM guardrail rates, which a free 1B local model now measures.
+- The **numbers exist for the dev seed**. Four targets are missed (detection precision and F1, RCA top-3, guided-vs-brute-force gap). The two LLM guardrail rates are met by a free OpenRouter model, on 10 memos.
 - README, CI workflow, AI-use log, VERIFICATION and DEMO exist.
 - REES46 runs end to end, with injected incidents.
 - The **team work** (explainers, report, slides) has **not started**.
@@ -58,7 +58,7 @@ Free-only rules (decision 2026-10-15) are guarded by tests: `test_default_narrat
 
 | Done | Item | Evidence |
 |---|---|---|
-| [x] | 317 tests pass | `.venv\Scripts\python -m pytest` on 2026-10-24: all 317 passed (315 on 2026-10-23; the new ones cover 429 handling and free-only OpenRouter model IDs) |
+| [x] | 318 tests pass | `.venv\Scripts\python -m pytest` on 2026-10-24: `318 passed in 127.01s` (315 on 2026-10-23; the new ones cover 429 handling, free-only OpenRouter model IDs and the A4 memo cap) |
 | [x] | Pass from a clean clone | 2026-10-23, Gate 4 in [VERIFICATION.md](VERIFICATION.md): `git clone --branch ticket-reporting`, `uv sync --locked --extra dev --extra embeddings`, `pytest`, `generate`, `run` |
 | [x] | No network or key needed | Claude and OpenAI-compatible clients are injected or faked in `tests/test_llm.py`; `sentence_transformers` is faked in `tests/test_retrieval.py` |
 | [~] | Each member's own 2 tests (W2) | A: `test_my_retrieval_test_the_window_filter_holds_on_a_generated_scenario`, `test_my_reporting_test_an_invented_number_ends_in_the_template_memo` (AI-written; A must read and defend them). B, C, D: none |
@@ -90,8 +90,8 @@ Reproducibility check: three runs (2026-10-15 and two on 2026-10-23) match on ev
 | 14 | [x] | Retrieval P@5, LSA | ≥ 0.60 | 0.75 (0.69-0.81) |
 | 15 | [x] | R@10 reported with its cap | report | `r_at_10` and `r_at_10_cap` in `metrics.json` (`evaluation.py:296-297`) |
 | 16 | [x] | 100% of final memos compliant | 1.00 | 1.00 (template); `test_template_memos_always_pass_the_guardrails` |
-| 17 | **MISS** | LLM first-attempt pass | ≥ 0.80 | 0.00 (0 of 10 memos), free local `gemma3:1b` via Ollama |
-| 18 | **MISS** | LLM pass after retries | ≥ 0.95 | 0.20 (2 of 10); the other 8 fell back to the template, so criterion 16 still holds |
+| 17 | [x] | LLM first-attempt pass | ≥ 0.80 | 0.80 (8 of 10 memos), OpenRouter free `dots-3-note-preview` (2026-10-24). Local: `gemma3:4b` 0.40, `gemma3:1b` 0.00. Only 10 memos: one memo is 10 points |
+| 18 | [x] | LLM pass after retries | ≥ 0.95 | 1.00 (10 of 10), same run. Local: `gemma3:4b` 0.60, `gemma3:1b` 0.20; the rest fell back to the template, so criterion 16 holds |
 | 19 | [x] | End-to-end time, template | ≤ 60 s | 14.2 s (13.2-15.2) per incident (11.2 s on a quiet machine) |
 
 Also measured, no target:
@@ -101,7 +101,7 @@ Also measured, no target:
 - Guided RCA is 2.4x **slower** in wall time than brute force (13.2 s vs 5.1 s median).
 - Impact against the generator's loss truth: mean relative error +0.01 (−0.08 to 0.10), median absolute 0.11 (35 incidents).
 
-Criteria 17-18 were measured with a 1B model, the only free LLM on the laptop. A larger free model is untested (open issue 4).
+Criteria 17-18 come from three runs of the same 20 scenarios and the same 10 memo contexts (`evaluate --scenarios 20 --with-llm`, with `--config config/openrouter.yaml`, `config/ollama_4b.yaml`, or the default `gemma3:1b`; outputs in `outputs/openrouter/`, `outputs/ollama_4b/`, `outputs/`). With 10 memos the rates are coarse; a 50-memo run with `gemma3:27b` on Kaggle is next (open issue 4).
 
 ## 5. Ablations (PLAN §5.3)
 
@@ -110,7 +110,7 @@ Criteria 17-18 were measured with a 1B model, the only free LLM on the laptop. A
 | [x] | A1 | MiniLM vs LSA | P@5 0.91 vs 0.75; P@10 0.89 vs 0.80 | `summary.md`, "Retrieval" table |
 | [x] | A2 | M1 without the M0 offset | BR blamed 0.00 with offset; without it found 0.69, exact 0.57 | `metrics.json`, RCA no-offset |
 | [~] | A3 | Guided vs brute force + distractor attributes | Guided vs brute force done (2.8% of slices). **Distractors not run** | `metrics.json` says "not run (W5)" |
-| [~] | A4 | LLM on raw table vs pipeline context | Context arm run with free `gemma3:1b`: first-attempt 0.00, after retries 0.20, fallback 0.80 (10 memos). **Raw-table arm not built** | `metrics.json`, `a4_llm` |
+| [~] | A4 | LLM on raw table vs pipeline context | Context arm, 10 memos, first-attempt / after retries / fallback: OpenRouter free `dots-3-note-preview` 0.80 / 1.00 / 0.00; local `gemma3:4b` 0.40 / 0.60 / 0.40; local `gemma3:1b` 0.00 / 0.20 / 0.80. **Raw-table arm not built** | `metrics.json`, `a4_llm`; memo count is `evaluation.a4_max_memos` |
 | [x] | A5 | Metadata boosts off | P@5 MiniLM 0.83, LSA 0.70 | `metrics.json`, retrieval no-boost |
 
 ## 6. Design review notes (PLAN, end)
@@ -133,7 +133,7 @@ Criteria 17-18 were measured with a 1B model, the only free LLM on the laptop. A
 | [x] | GitHub repo | A | `origin` = `github.com/nishida09datkar/DATA-SCIENCE-CP`, `main` pushed |
 | [x] | Plan | A | `docs/PLAN.md` (team still has to review and adopt it in W1) |
 | [x] | Research and references | All | `docs/RESEARCH.md`; some entries marked **[unverified]** |
-| [~] | Protected `main`, PR + review rule | A | Not verified on GitHub; both commits went straight to `main` |
+| [x] | Protected `main`, PR + review rule | A | Branch protection since 2026-10-24 (GitHub API): PR with 1 approval, required check `test`, no force-push or delete; admins can bypass |
 | [~] | Every reference verified at its source | All | Several **[unverified]** entries remain in RESEARCH.md |
 | [x] | README | D | `README.md`: setup, run, outputs, config, cost, layout, contributing, Windows notes; install steps checked on a clean copy (section 3). A newcomer still has to try it in W4 |
 | [~] | CI (GitHub Actions, windows-latest, Python 3.12) | D | `.github/workflows/ci.yml` written and its steps pass locally; first GitHub run pending the push |
@@ -171,15 +171,16 @@ Week dates are not fixed yet (map back from the deadline). No week is closed.
 
 ## 9. Open issues and decisions needed
 
-1. **Detection precision (B).** 21 of 56 kpi_drop windows match no incident: traffic and revenue dip together while conversion is normal. A conversion-only gate raised seed-101 precision to 0.89 with recall unchanged, but redefines kpi_drop. Team decision needed. Evidence: PLAN §5.5, "Detection precision miss".
+1. **Detection precision (B).** 21 of 56 kpi_drop windows match no incident: traffic and revenue dip together while conversion is normal. A conversion-only gate raised seed-101 precision to 0.89 with recall unchanged, but redefines kpi_drop. Team decision needed (GitHub issue #1). Evidence: PLAN §5.5, "Detection precision miss".
 2. **RCA top-3 and brute-force gap (C).** Correlated or nested attributes (mobile within Android) drop out of the candidate list; this causes both the top-3 miss and the 8-point gap to brute force. Fix (score one-attribute extensions of the chosen slice) is described, not built. Evidence: PLAN §5.5, "RCA top-3 miss".
 3. **Not built:** A3 distractor attributes; A4 raw-table arm; held-out run.
-4. **Free LLM (A).** The OpenAI-compatible narrator is built. On a local 1B model (gemma3:1b) it reaches 0.00 first-attempt and 0.20 after retries.
-   - Failure causes: quotes wrapped in extra quotation marks, too many quotes or actions, and segment values left out.
-   - Team decision needed: either run a larger free model (a free-tier API, which needs a key in `LLM_API_KEY`), or report the 1B result as is.
-   - Ready to try (2026-10-24), not yet measured: `config/groq.yaml` (Groq free tier, `openai/gpt-oss-120b`, key in `GROQ_API_KEY`; a 429 is waited out), `config/openrouter.yaml` (only `:free` model IDs accepted, key in `OPENROUTER_API_KEY`) and `config/ollama_4b.yaml` (local `gemma3:4b` for a 6 GB GPU).
+4. **Free LLM (A, GitHub issue #2).** The OpenAI-compatible narrator is built. Measured on 2026-10-24 (10 memos each, first-attempt / after retries):
+   - OpenRouter free `dots-studio/dots-3-note-preview:free`: 0.80 / 1.00. Meets criteria 17-18. It is a reasoning model: it needs `max_tokens: 16000` and `effort: low`, or it stops at `finish_reason=length`. The first choice, `nvidia/nemotron-3-super-120b-a12b:free`, answered 404 from its provider. Free providers may log prompts, so it gets synthetic data only.
+   - Local `gemma3:4b` (6 GB GPU, `config/ollama_4b.yaml`): 0.40 / 0.60. Local `gemma3:1b`: 0.00 / 0.20 (quotes wrapped in extra quotation marks, too many quotes or actions, segment values left out).
+   - Next: 50 memos (`evaluation.a4_max_memos`) with `gemma3:27b` on a free Kaggle 2x T4 (`scripts/kaggle/`), so the rates rest on more than 10 memos.
+   - `config/groq.yaml` (Groq free tier) is still untested: no key.
    - Also decide whether the quote check should ignore surrounding quotation marks.
-5a. **Impact on segments with unusual baskets (A).** Lost revenue = lost orders × the window's average order value. That gives a mean error of +0.01 on synthetic data, but −65% on the REES46 apple incident, whose baskets are far above average. A segment-level order value would fix it; not built.
+5a. **Impact on segments with unusual baskets (A).** Lost revenue = lost orders × the window's average order value. That gives a mean error of +0.01 on synthetic data, but −65% on the REES46 apple incident, whose baskets are far above average. A segment-level order value would fix it; not built (GitHub issue #3).
 5. **RCA baseline ignores level shifts (C).** On REES46, R-002 and R-015 were detected but got no findings from either method: the 7-day baseline fell in days with heavier cart logging (failure rate 0.34 vs 0.28 in the window), so the window's total excess over M0 was negative (−103, −192) and RCA stops at E ≤ 0. Detection compares with an hourly STL expectation; RCA compares with a flat 7-day average. Synthetic data has no such shift. Evidence: `rca_excess` column in `outputs/rees46/2019-Oct/incidents.csv`; `brute_force_window` logs "has no excess failures".
 6. **Detection on heavy-tailed real data (B).** The clean October already has 7 buckets with conversion z < −5 and 14 with |attempts z| > 5 (cart-logging jumps on Oct 4-6 and 14-27), so the Isolation Forest does not isolate injected drops of z −5 to −6 (R-003, R-005, R-013, R-019 missed). Evidence: `min_conversion_z` column in `incidents.csv`.
 7. **Review needed (B, C, D): the schema is now config-driven.**

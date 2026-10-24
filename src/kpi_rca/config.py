@@ -632,6 +632,7 @@ class EvaluationConfig(_Model):
     incident_free_runs: int = Field(default=1, ge=0)  # extra scenarios without incidents, for false alarms/day
     quick_scenarios: int = Field(default=3, ge=1)  # n_scenarios used by `evaluate --quick`
     bootstrap_resamples: int = Field(default=1000, ge=100)  # for the 95% confidence intervals
+    a4_max_memos: int = Field(default=10, ge=1)  # memos ablation A4 asks the LLM for (each up to 1 + max_retries calls)
 
     @model_validator(mode="after")
     def _ranges_ok(self) -> "EvaluationConfig":

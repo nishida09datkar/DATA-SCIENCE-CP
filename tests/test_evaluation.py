@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -188,6 +189,21 @@ def test_a4_is_not_run_without_with_llm_even_when_a_key_is_set(monkeypatch):
     monkeypatch.setattr(E, "get_narrator", no_paid_calls)
     status = E._run_a4(tiny_cfg(), contexts=[{}], with_llm=False)["status"]
     assert status.startswith("not run (paid API; free-testing policy")
+
+
+def test_a4_writes_at_most_a4_max_memos(monkeypatch):
+    calls = []
+
+    def fake_narrate(narrator, context, llm_cfg, reporting_cfg):
+        calls.append(context)
+        return "memo", SimpleNamespace(attempt_violations=[[]], passed=True, fallback_used=False)
+
+    monkeypatch.setattr(E, "get_narrator", lambda cfg, **kw: SimpleNamespace(name="fake", model="fake-model"))
+    monkeypatch.setattr(E, "narrate_with_guardrails", fake_narrate)
+    cfg = tiny_cfg(a4_max_memos=3)
+    cfg = cfg.model_copy(update={"llm": cfg.llm.model_copy(update={"provider": "openai_compatible"})})
+    a4 = E._run_a4(cfg, contexts=[{"i": i} for i in range(5)], with_llm=True)
+    assert len(calls) == 3 and a4["n_memos"] == 3 and a4["first_attempt_pass_rate"] == 1.0
 
 
 def test_unavailable_backend_is_skipped(monkeypatch):

@@ -61,7 +61,6 @@ MIN_GAP_H = 12  # hours between any two injected events
 END_MARGIN_H = 6  # no incident ends in the last hours (the replay and ticket search need room after it)
 SURGE_EARLIEST_DAY = 2  # batch STL needs a couple of days before a surge
 STREAM_PAD_H = 3  # the "incidents" stream mode replays [start - 3 h, end + 3 h)
-A4_MAX_CALLS = 10  # cap on Claude calls in ablation A4
 BR = "country=BR"  # the low-conversion country that must never be blamed
 
 ProgressFn = Callable[[str], None]
@@ -601,7 +600,7 @@ def _run_a4(cfg: AppConfig, contexts: list[dict], with_llm: bool) -> dict:
     except (TypeError, ValueError) as exc:
         return {"status": f"skipped (no usable narrator: {exc})"}
     first, final, fallback, latency = [], [], [], []
-    for context in contexts[:A4_MAX_CALLS]:
+    for context in contexts[: cfg.evaluation.a4_max_memos]:
         t = time.perf_counter()
         _, guard = narrate_with_guardrails(narrator, context, llm_cfg, cfg.reporting)
         latency.append(time.perf_counter() - t)

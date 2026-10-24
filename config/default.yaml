@@ -196,3 +196,4 @@ evaluation:
   incident_free_runs: 1             # extra incident-free scenarios for false alarms per day
   quick_scenarios: 3                # n_scenarios for `evaluate --quick`
   bootstrap_resamples: 1000
+  a4_max_memos: 10                  # LLM memos in ablation A4 (--with-llm); each takes up to 3 calls
