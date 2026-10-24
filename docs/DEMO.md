@@ -10,7 +10,7 @@ Numbers below are from the 2026-10-23 runs on commit `c66ed09` (seed 42, default
 .venv\Scripts\python -m pytest
 ```
 
-Expect `315 passed`. For a short live check of the guardrails only:
+Expect `323 passed` (2026-10-24). For a short live check of the guardrails only:
 
 ```powershell
 .venv\Scripts\python -m pytest -k "guardrail" -v
@@ -48,7 +48,23 @@ Expected window table:
 
 Open `outputs/reports/INC-20260910-1300.md` (the INC-001 memo, shown in full below) and `INC-20260910-1300_kpi.png` (conversion against its expected band). `INC-20260910-1300.json` holds the provenance: narrator, attempts, guardrail result, stage timings.
 
-## 4. Streaming replay (about 75 seconds)
+## 4. Dashboard (the main screen to share)
+
+```powershell
+.venv\Scripts\python -m kpi_rca dashboard --run outputs
+start outputs\dashboard\index.html
+```
+
+One offline page; it needs no server or network. The Benchmark and Real data pages read `outputs/evaluation/` and `outputs/rees46/` from earlier runs (step 7); without them, those pages say which command to run.
+
+Click through in this order:
+
+1. **Overview.** The top chart is hourly conversion against expected; the bars under it are the gap in pp. Each window is labelled where it peaks: −3.5 pp DE / iOS / PayPal, −4.5 pp Android / 5.4.0, and +1.3 pp "Surge, skipped". The dashed outlines are the answer key from the generator, which the pipeline never reads; the "Answer key" switch hides them.
+2. **Click the −3.5 pp label** (INC-20260910-1300). The tiles compare the estimate with the key (revenue −13.2%, orders −2.2%). Below: the segment fails at 8.7x its baseline rate, the SHAP bars, PAYPAL_SDK_TIMEOUT as the top error code (matches the key), the 3 closest tickets, and the 4 guardrail checks. "Read the memo" opens the memo text.
+3. **Benchmark.** 12 of 15 targets met; the 3 misses (Precision, F1, Top-3) are named. Each scorecard row shows the mean, its 95% CI and the target, so a miss is visible as a dot left of its target mark.
+4. **Real data.** Every injected REES46 incident that moved total conversion by 6.3σ or more was detected (6), and none weaker (14). The chart shows that boundary directly.
+
+## 5. Streaming replay (about 75 seconds)
 
 ```powershell
 .venv\Scripts\python -m kpi_rca stream --data data
@@ -64,7 +80,7 @@ replayed 336 buckets in 73.1 s; 14 window(s)
 
 Say plainly: the streaming replay also raises 3 kpi_drop alerts that match no incident (S-008, S-009, S-014). This is the detection-precision miss (VERIFICATION.md, criterion 2).
 
-## 5. Optional: a free local LLM narrator
+## 6. Optional: a free local LLM narrator
 
 Only if Ollama is installed and `ollama pull gemma3:1b` has been run. It is never needed for the demo.
 
@@ -74,10 +90,10 @@ Only if Ollama is installed and `ollama pull gemma3:1b` has been run. It is neve
 
 On 2026-10-23 the INC-002 memo passed the guardrails on the first attempt, while the INC-001 drafts failed all 3 attempts. That memo fell back to the template, and `provenance.narrator` in its JSON says `template_fallback`. This is the point to show: an unchecked LLM sentence never reaches the memo.
 
-## 6. Results to show (no need to rerun live)
+## 7. Results to show (no need to rerun live)
 
-- `outputs/evaluation/summary.md`: the 20-scenario benchmark (`evaluate --scenarios 20 --out outputs`, about 14 minutes without `--with-llm`, so it is not run live).
-- `outputs/rees46_run_injected/reports/INC-20191025-1800.md` shows the pipeline on real REES46 traffic with one injected incident (VERIFICATION.md, Phase 3). It needs the Kaggle file, so show it from disk.
+- `outputs/evaluation/summary.md`: the 20-scenario benchmark (`evaluate --scenarios 20 --out outputs`, about 14 minutes without `--with-llm`, so it is not run live). The dashboard's Benchmark page draws it.
+- `outputs/rees46_run_injected/reports/INC-20191025-1800.md` shows the pipeline on real REES46 traffic with one injected incident (VERIFICATION.md, Phase 3). It needs the Kaggle file, so show it from disk. The dashboard's Real data page draws the 20-incident validation from `scripts/validate_rees46.py`.
 
 ## INC-001 memo (expected output of step 3)
 
