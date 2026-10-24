@@ -1,6 +1,6 @@
 # Project Status: KPI Root-Cause Analysis Engine
 
-As of 2026-10-23, branch `ticket-reporting` (code commit `c66ed09`, not yet pushed or merged; `main` is at `a5cc842`). Scope and targets: [PLAN.md](PLAN.md). References: [RESEARCH.md](RESEARCH.md). Full verification run of AGENT_PLAN phases 0-4, with every command: [VERIFICATION.md](VERIFICATION.md). Demo script: [DEMO.md](DEMO.md).
+As of 2026-10-24, branch `ticket-reporting` (not yet pushed or merged; `main` is at `a5cc842`). Measured numbers below are from 2026-10-23, code commit `c66ed09`; the 2026-10-24 commits add free narrator configs and 429 handling in `reporting/llm.py`, which no measured number depends on (open issue 4). Scope and targets: [PLAN.md](PLAN.md). References: [RESEARCH.md](RESEARCH.md). Full verification run of AGENT_PLAN phases 0-4, with every command: [VERIFICATION.md](VERIFICATION.md). Demo script: [DEMO.md](DEMO.md).
 
 **Legend:** `[x]` done, with evidence · `[~]` partly done · `[ ]` not started · **MISS** = built and measured, but the target is not met.
 **Evidence** means something a team member can open or rerun: a file and line, a named test, or a command plus the output file it writes.
@@ -10,7 +10,7 @@ As of 2026-10-23, branch `ticket-reporting` (code commit `c66ed09`, not yet push
 | Area | Done | Partial | Not started / missed | Progress |
 |---|---|---|---|---|
 | [2. Code modules](#2-code-modules) | 21 / 21 | 0 | 0 | 100% |
-| [3. Tests](#3-tests) | 315 passing, 15 files | | | Done |
+| [3. Tests](#3-tests) | 317 passing, 15 files | | | Done |
 | [4. Success criteria](#4-success-criteria-plan-54) | 12 / 19 met | | 6 missed, 1 not measured | 63% |
 | [5. Ablations](#5-ablations-plan-53) | 3 / 5 | 2 (A3, A4 context arm) | 0 | 80% |
 | [6. Design review notes](#6-design-review-notes-plan-end) | 4 / 8 | 3 | 1 | 69% |
@@ -58,7 +58,7 @@ Free-only rules (decision 2026-10-15) are guarded by tests: `test_default_narrat
 
 | Done | Item | Evidence |
 |---|---|---|
-| [x] | 315 tests pass | `.venv\Scripts\python -m pytest` on 2026-10-23: `315 passed in 161.26s` |
+| [x] | 317 tests pass | `.venv\Scripts\python -m pytest` on 2026-10-24: all 317 passed (315 on 2026-10-23; the new ones cover 429 handling and free-only OpenRouter model IDs) |
 | [x] | Pass from a clean clone | 2026-10-23, Gate 4 in [VERIFICATION.md](VERIFICATION.md): `git clone --branch ticket-reporting`, `uv sync --locked --extra dev --extra embeddings`, `pytest`, `generate`, `run` |
 | [x] | No network or key needed | Claude and OpenAI-compatible clients are injected or faked in `tests/test_llm.py`; `sentence_transformers` is faked in `tests/test_retrieval.py` |
 | [~] | Each member's own 2 tests (W2) | A: `test_my_retrieval_test_the_window_filter_holds_on_a_generated_scenario`, `test_my_reporting_test_an_invented_number_ends_in_the_template_memo` (AI-written; A must read and defend them). B, C, D: none |
@@ -177,6 +177,7 @@ Week dates are not fixed yet (map back from the deadline). No week is closed.
 4. **Free LLM (A).** The OpenAI-compatible narrator is built. On a local 1B model (gemma3:1b) it reaches 0.00 first-attempt and 0.20 after retries.
    - Failure causes: quotes wrapped in extra quotation marks, too many quotes or actions, and segment values left out.
    - Team decision needed: either run a larger free model (a free-tier API, which needs a key in `LLM_API_KEY`), or report the 1B result as is.
+   - Ready to try (2026-10-24), not yet measured: `config/groq.yaml` (Groq free tier, `openai/gpt-oss-120b`, key in `GROQ_API_KEY`; a 429 is waited out), `config/openrouter.yaml` (only `:free` model IDs accepted, key in `OPENROUTER_API_KEY`) and `config/ollama_4b.yaml` (local `gemma3:4b` for a 6 GB GPU).
    - Also decide whether the quote check should ignore surrounding quotation marks.
 5a. **Impact on segments with unusual baskets (A).** Lost revenue = lost orders × the window's average order value. That gives a mean error of +0.01 on synthetic data, but −65% on the REES46 apple incident, whose baskets are far above average. A segment-level order value would fix it; not built.
 5. **RCA baseline ignores level shifts (C).** On REES46, R-002 and R-015 were detected but got no findings from either method: the 7-day baseline fell in days with heavier cart logging (failure rate 0.34 vs 0.28 in the window), so the window's total excess over M0 was negative (−103, −192) and RCA stops at E ≤ 0. Detection compares with an hourly STL expectation; RCA compares with a flat 7-day average. Synthetic data has no such shift. Evidence: `rca_excess` column in `outputs/rees46/2019-Oct/incidents.csv`; `brute_force_window` logs "has no excess failures".

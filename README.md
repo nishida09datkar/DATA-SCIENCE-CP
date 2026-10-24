@@ -31,7 +31,7 @@ Check the install:
 .venv\Scripts\python -m pytest
 ```
 
-All tests must pass (315 on 2026-10-23, about 3 minutes). They need no network and no API key.
+All tests must pass (317 on 2026-10-24, about 3 minutes). They need no network and no API key.
 
 ## Run
 
