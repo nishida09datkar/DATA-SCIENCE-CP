@@ -1,0 +1,11 @@
+# Kaggle GPU T4 x2 (about 30 GB VRAM): local Ollama with gemma3:27b, 100 scenarios, 50 LLM memos; merged over the defaults.
+# Run by scripts/kaggle/run_eval.py (push and download commands are in that file). Free: Kaggle's weekly GPU quota.
+
+llm:
+  provider: openai_compatible
+  openai_model: gemma3:27b
+  timeout_s: 600  # the first call loads about 17 GB onto two GPUs
+
+evaluation:
+  n_scenarios: 100
+  a4_max_memos: 50  # each memo takes up to 3 calls

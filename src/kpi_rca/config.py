@@ -507,9 +507,10 @@ class RCAConfig(_Model):
     @field_validator("attributes")
     @classmethod
     def _attrs_ok(cls, v: list[str]) -> list[str]:
-        unknown = sorted(set(v) - set(SEGMENT_ATTRIBUTES))
-        if unknown or not v:
-            raise ValueError(f"rca.attributes must be a non-empty subset of {list(SEGMENT_ATTRIBUTES)}")
+        # Any column names: the RCA stages also run on non-generator data (scripts/validate_rees46.py).
+        # AppConfig still limits the synthetic pipeline to SEGMENT_ATTRIBUTES.
+        if not v or len(set(v)) != len(v) or any(not a.strip() for a in v):
+            raise ValueError("rca.attributes must be a non-empty list of unique, non-blank column names")
         return v
 
 
@@ -528,17 +529,43 @@ class RetrievalConfig(_Model):
     os_boost: float = 0.05
     similarity_threshold: float = 0.35
     random_state: int = 42
+    # Finding attributes that become query words, in this order. The country is left out on
+    # purpose: it is a score boost on customer_country, not query text.
+    query_attributes: list[str] = Field(default_factory=lambda: ["payment_gateway", "os", "device_type", "app_version"])
+    # Segment value -> the words customers write about it. A value missing here is used as it is.
+    customer_words: dict[str, dict[str, str]] = Field(
+        default_factory=lambda: {
+            "payment_gateway": {
+                "PayPal": "PayPal",
+                "Klarna": "Klarna",
+                "Stripe": "Stripe card",  # card processors: customers say "card", rarely the processor's name
+                "Adyen": "Adyen card",
+                "Braintree": "Braintree card",
+            },
+            "os": {"iOS": "iPhone iOS app", "Android": "Android phone app", "Windows": "Windows PC", "macOS": "Mac"},
+            "device_type": {"mobile": "phone", "tablet": "tablet", "desktop": "computer laptop"},
+        }
+    )
 
 
 class LLMConfig(_Model):
     # "template" by default: free and offline. Claude is a paid API and strictly opt-in
     # (provider "claude", or "auto", which uses Claude whenever a key is in the environment).
-    provider: Literal["auto", "claude", "template"] = "template"
+    # "openai_compatible" is any /v1/chat/completions server; the default points at a local
+    # Ollama, which is free. LLM_BASE_URL / LLM_MODEL override these; the key is only ever
+    # read from the environment variable named by api_key_env (local servers need none).
+    provider: Literal["auto", "claude", "openai_compatible", "template"] = "template"
     model: str = "claude-opus-5-5"
     max_tokens: int = 16000
     max_retries: int = 2
     server_side_fallback: bool = True
     timeout_s: float = 120.0
+    base_url: str = "http://localhost:11434/v1"
+    openai_model: str = "gemma3:1b"
+    api_key_env: str = "LLM_API_KEY"
+    response_format: Literal["json_schema", "json_object"] = "json_schema"
+    effort: Literal["low", "medium", "high"] | None = None  # sent as reasoning_effort only when set
+    temperature: float = Field(default=0.0, ge=0, le=2)
 
 
 class ReportingConfig(_Model):
@@ -550,6 +577,28 @@ class ReportingConfig(_Model):
     memo_max_words: int = 200
     numeric_rel_tol: float = 0.02
     make_plots: bool = True
+    # Segment guardrail. country_names: the names a writer may use for a country code.
+    # known_segment_values: proper-noun values a memo may name only when a finding holds
+    # them; the defaults are the generator's countries, OSs and payment gateways.
+    country_names: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "US": ["United States", "USA", "U.S."],
+            "DE": ["Germany", "German"],
+            "GB": ["United Kingdom", "UK", "Britain", "British"],
+            "FR": ["France", "French"],
+            "IN": ["India", "Indian"],
+            "BR": ["Brazil", "Brazilian"],
+            "CA": ["Canada", "Canadian"],
+            "JP": ["Japan", "Japanese"],
+        }
+    )
+    known_segment_values: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "country": list(DataConfig().countries),
+            "os": list(DataConfig().os),
+            "payment_gateway": list(DataConfig().payment_gateways),
+        }
+    )
 
 
 # --------------------------------------------------------------------- evaluation
@@ -583,6 +632,7 @@ class EvaluationConfig(_Model):
     incident_free_runs: int = Field(default=1, ge=0)  # extra scenarios without incidents, for false alarms/day
     quick_scenarios: int = Field(default=3, ge=1)  # n_scenarios used by `evaluate --quick`
     bootstrap_resamples: int = Field(default=1000, ge=100)  # for the 95% confidence intervals
+    a4_max_memos: int = Field(default=10, ge=1)  # memos ablation A4 asks the LLM for (each up to 1 + max_retries calls)
 
     @model_validator(mode="after")
     def _ranges_ok(self) -> "EvaluationConfig":
@@ -602,6 +652,10 @@ class EvaluationConfig(_Model):
 
 class AppConfig(_Model):
     seed: int = 42
+    # "generated": data from `generate`, whose attributes are SEGMENT_ATTRIBUTES.
+    # "external": a real dataset mapped by kpi_rca.data.adapters; rca.attributes may then
+    # name its own columns, and `generate` / `evaluate` (synthetic only) refuse to run.
+    dataset: Literal["generated", "external"] = "generated"
     data: DataConfig = Field(default_factory=DataConfig)
     detection: DetectionConfig = Field(default_factory=DetectionConfig)
     rca: RCAConfig = Field(default_factory=RCAConfig)
@@ -609,6 +663,13 @@ class AppConfig(_Model):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+
+    @model_validator(mode="after")
+    def _rca_attrs_are_generated(self) -> AppConfig:
+        unknown = sorted(set(self.rca.attributes) - set(SEGMENT_ATTRIBUTES))
+        if unknown and self.dataset == "generated":
+            raise ValueError(f"rca.attributes {unknown} are not generated; allowed: {list(SEGMENT_ATTRIBUTES)}")
+        return self
 
 
 def _section_type(model_cls: type[BaseModel], key: str) -> type[BaseModel] | None:

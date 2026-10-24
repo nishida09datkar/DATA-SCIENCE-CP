@@ -5,7 +5,9 @@ replays canned responses (or raises the SDK's own exceptions) and records
 every request it receives.
 """
 
+import email.message
 import json
+import urllib.error
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -18,8 +20,11 @@ from kpi_rca.config import LLMConfig, ReportingConfig
 from kpi_rca.reporting.context import build_incident_context
 from kpi_rca.reporting.guardrails import check_narrative
 from kpi_rca.reporting.llm import (
+    RATE_LIMIT_RETRIES,
+    RATE_LIMIT_WAIT_S,
     ClaudeNarrator,
     NarratorError,
+    OpenAICompatibleNarrator,
     TemplateNarrator,
     get_narrator,
     narrate_with_guardrails,
@@ -441,3 +446,173 @@ def test_template_narrator_runs_once_and_is_not_a_fallback():
     narrative, report = narrate_with_guardrails(TemplateNarrator(), make_context(), LLM, CFG)
     assert report.narrator_used == "template" and not report.fallback_used and report.fallback_reason is None
     assert report.passed and report.attempts == 1 and report.attempt_violations == [[]]
+
+
+# --- the OpenAI-compatible narrator (fake transport, no network) ------------------------------
+
+OAI = LLMConfig(provider="openai_compatible", max_retries=1)
+
+
+class FakePost:
+    """Stands in for the HTTP call: replays replies (dicts) or raises (exceptions), records requests."""
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = []
+
+    def __call__(self, url, headers, body, timeout_s):
+        self.calls.append({"url": url, "headers": headers, "body": body, "timeout_s": timeout_s})
+        assert self.outcomes, "unexpected HTTP call"
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def chat(content, finish_reason="stop", **message):
+    return {"choices": [{"finish_reason": finish_reason, "message": {"role": "assistant", "content": content, **message}}]}
+
+
+def as_json(memo):
+    return memo.model_dump_json()
+
+
+@pytest.fixture
+def clean_llm_env(monkeypatch):
+    for name in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def oai_narrate(post, llm=OAI):
+    return narrate_with_guardrails(OpenAICompatibleNarrator(llm, post), make_context(), llm, CFG)
+
+
+def test_openai_compatible_good_json_is_used_as_is(clean_llm_env):
+    post = FakePost(chat(as_json(GOOD)))
+    narrative, report = oai_narrate(post)
+    assert narrative == GOOD and report.passed and report.attempts == 1
+    assert report.narrator_used == "openai_compatible" and not report.fallback_used
+
+
+def test_openai_compatible_request_shape(clean_llm_env):
+    post = FakePost(chat(as_json(GOOD)))
+    OpenAICompatibleNarrator(OAI, post).generate(make_context())
+    call = post.calls[0]
+    assert call["url"] == "http://localhost:11434/v1/chat/completions"
+    body = call["body"]
+    assert body["model"] == "gemma3:1b" and body["temperature"] == 0.0
+    assert body["response_format"]["type"] == "json_schema"
+    assert body["response_format"]["json_schema"]["schema"] == MemoNarrative.model_json_schema()
+    assert "reasoning_effort" not in body  # only sent when llm.effort is set
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
+    assert "untrusted" in body["messages"][0]["content"] and "JSON schema" in body["messages"][0]["content"]
+    assert "Authorization" not in call["headers"]  # a local server needs no key
+
+
+def test_openai_compatible_env_overrides_and_key_header(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", "https://example-free-llm.test/v1/")
+    monkeypatch.setenv("LLM_MODEL", "some-free-model")
+    monkeypatch.setenv("LLM_API_KEY", "secret-test-key")
+    post = FakePost(chat(as_json(GOOD)))
+    narrator = OpenAICompatibleNarrator(OAI.model_copy(update={"effort": "low", "response_format": "json_object"}), post)
+    narrator.generate(make_context())
+    call = post.calls[0]
+    assert call["url"] == "https://example-free-llm.test/v1/chat/completions"
+    assert call["body"]["model"] == "some-free-model" and narrator.model == "some-free-model"
+    assert call["body"]["reasoning_effort"] == "low"
+    assert call["body"]["response_format"] == {"type": "json_object"}
+    assert call["headers"]["Authorization"] == "Bearer secret-test-key"
+    assert "secret-test-key" not in json.dumps(call["body"])
+
+
+@pytest.mark.parametrize("url", ["https://api.openai.com/v1", "https://api.anthropic.com/v1", "not a url"])
+def test_openai_compatible_refuses_paid_hosts_and_bad_urls(clean_llm_env, url):
+    with pytest.raises(ValueError):
+        OpenAICompatibleNarrator(OAI.model_copy(update={"base_url": url}), FakePost())
+
+
+def test_openai_compatible_allows_only_free_models_on_openrouter(clean_llm_env):
+    router = OAI.model_copy(update={"base_url": "https://openrouter.ai/api/v1"})
+    with pytest.raises(ValueError, match=":free"):
+        OpenAICompatibleNarrator(router.model_copy(update={"openai_model": "nvidia/some-model"}), FakePost())
+    free = OpenAICompatibleNarrator(router.model_copy(update={"openai_model": "nvidia/some-model:free"}), FakePost())
+    assert free.base_url == "https://openrouter.ai/api/v1"
+
+
+def test_openai_compatible_strips_markdown_fences(clean_llm_env):
+    post = FakePost(chat("```json\n" + as_json(GOOD) + "\n```"))
+    assert OpenAICompatibleNarrator(OAI, post).generate(make_context()) == GOOD
+
+
+def test_openai_compatible_invalid_json_is_retried_with_the_schema_problems(clean_llm_env):
+    post = FakePost(chat('{"headline": "SEV1: cut off'), chat(as_json(GOOD)))
+    narrative, report = oai_narrate(post)
+    assert narrative == GOOD and report.passed and report.attempts == 2
+    assert report.attempt_violations[0] and all(v.startswith("schema:") for v in report.attempt_violations[0])
+    retry_prompt = post.calls[1]["body"]["messages"][1]["content"]
+    assert all(v in retry_prompt for v in report.attempt_violations[0])
+
+
+def test_my_reporting_test_an_invented_number_ends_in_the_template_memo(clean_llm_env):
+    """Owner A's reporting test: an LLM that keeps inventing a loss never reaches the memo."""
+    post = FakePost(chat(as_json(INVENTED)), chat(as_json(INVENTED)))
+    narrative, report = oai_narrate(post)
+    assert narrative == TemplateNarrator().generate(make_context())
+    assert "99,999" not in narrative.executive_summary
+    assert report.fallback_used and report.narrator_used == "template_fallback" and report.passed
+    assert all(any("USD 99,999" in v for v in attempt) for attempt in report.attempt_violations)
+    assert "USD 99,999" in post.calls[1]["body"]["messages"][1]["content"]  # the retry was told why
+
+
+@pytest.mark.parametrize(
+    "outcome, reason",
+    [
+        (urllib.error.HTTPError("u", 401, "unauthorized", None, None), "authentication failed (401): check LLM_API_KEY"),
+        (urllib.error.HTTPError("u", 404, "not found", None, None), "not found (404)"),
+        (urllib.error.HTTPError("u", 500, "boom", None, None), "server error (500)"),
+        (urllib.error.URLError("connection refused"), "could not reach"),
+        (TimeoutError(), "could not reach"),
+        (chat("{}", finish_reason="length"), "finish_reason=length"),
+        (chat(None, refusal="I can't help with that."), "refused"),
+        ({"error": "no choices"}, "no choices[0].message"),
+    ],
+    ids=["401", "404", "500", "connection", "timeout", "cut-off", "refusal", "malformed"],
+)
+def test_openai_compatible_failures_fall_back_without_retrying(clean_llm_env, outcome, reason):
+    post = FakePost(outcome)
+    narrative, report = oai_narrate(post)
+    assert len(post.calls) == 1
+    assert narrative == TemplateNarrator().generate(make_context())
+    assert report.fallback_used and reason in report.fallback_reason
+
+
+def rate_limited(retry_after=None):
+    headers = email.message.Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return urllib.error.HTTPError("u", 429, "slow down", headers, None)
+
+
+def test_openai_compatible_waits_out_a_429_and_resends(clean_llm_env):
+    post = FakePost(rate_limited("7"), rate_limited("not a number"), chat(as_json(GOOD)))
+    waits = []
+    narrator = OpenAICompatibleNarrator(OAI, post, sleep=waits.append)
+    narrative, report = narrate_with_guardrails(narrator, make_context(), OAI, CFG)
+    assert narrative == GOOD and report.passed and report.attempts == 1  # a 429 is not a failed draft
+    assert waits == [7.0, RATE_LIMIT_WAIT_S] and len(post.calls) == 3
+
+
+def test_openai_compatible_falls_back_when_the_429s_do_not_stop(clean_llm_env):
+    post = FakePost(*[rate_limited("600")] * (RATE_LIMIT_RETRIES + 1))
+    waits = []
+    narrator = OpenAICompatibleNarrator(OAI, post, sleep=waits.append)
+    narrative, report = narrate_with_guardrails(narrator, make_context(), OAI, CFG)
+    assert narrative == TemplateNarrator().generate(make_context())
+    assert report.fallback_used and "rate limit (429)" in report.fallback_reason
+    assert waits == [RATE_LIMIT_WAIT_S] * RATE_LIMIT_RETRIES  # Retry-After is capped
+    assert len(post.calls) == RATE_LIMIT_RETRIES + 1
+
+
+def test_openai_compatible_provider_is_opt_in(clean_llm_env):
+    assert isinstance(get_narrator(LLMConfig()), TemplateNarrator)  # the default stays the template
+    assert isinstance(get_narrator(LLMConfig(provider="openai_compatible")), OpenAICompatibleNarrator)

@@ -6,8 +6,9 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from kpi_rca.config import AppConfig, ConfigError, config_from_dict, load_config
+from kpi_rca.config import AppConfig, ConfigError, RCAConfig, config_from_dict, load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -129,3 +130,22 @@ def test_profile_and_weight_validation():
         config_from_dict({"evaluation": {"min_incidents": 3, "max_incidents": 2}})
     with pytest.raises(ConfigError, match="freq"):
         config_from_dict({"detection": {"freq": "every hour"}})
+
+
+def test_rca_attributes_are_free_alone_but_generated_in_the_app():
+    # RCAConfig alone takes any columns (REES46 validation); the synthetic app only the generated ones.
+    assert RCAConfig(attributes=["category", "brand"]).attributes == ["category", "brand"]
+    for bad in ([], ["brand", "brand"], [" "]):
+        with pytest.raises(ValidationError, match="non-empty list"):
+            RCAConfig(attributes=bad)
+    with pytest.raises(ConfigError, match="not generated"):
+        config_from_dict({"rca": {"attributes": ["country", "brand"]}})
+    assert config_from_dict({"rca": {"attributes": ["country", "os"]}}).rca.attributes == ["country", "os"]
+    external = config_from_dict({"dataset": "external", "rca": {"attributes": ["category", "brand"]}})
+    assert external.rca.attributes == ["category", "brand"]
+
+
+def test_the_rees46_config_loads():
+    cfg = load_config(ROOT / "config" / "rees46.yaml")
+    assert cfg.dataset == "external" and cfg.rca.attributes == ["category", "brand", "price_band"]
+    assert cfg.reporting.known_segment_values == {}

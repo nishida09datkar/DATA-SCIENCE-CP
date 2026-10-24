@@ -9,6 +9,7 @@ that names the column and the problem; they return a cleaned, time-sorted copy.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,8 @@ TICKETS_FILE = "tickets.parquet"
 GROUND_TRUTH_FILE = "ground_truth.json"
 
 REQUIRED_TICKET_COLUMNS = TICKET_COLUMNS[:6]  # gt_incident_id is optional (generated data only)
+# every transaction column except the segment attributes, in schema order
+CORE_TRANSACTION_COLUMNS = [c for c in TRANSACTION_COLUMNS if c not in SEGMENT_ATTRIBUTES]
 _OPTIONAL_TICKET_TEXT = ("customer_country", "device_os")
 
 
@@ -44,8 +47,14 @@ def save_scenario(scenario: Scenario, out_dir: str | Path) -> dict[str, Path]:
     return paths
 
 
-def load_scenario(data_dir: str | Path, *, validate: bool = True) -> Scenario:
-    """Read a data directory written by :func:`save_scenario` (ground truth optional)."""
+def load_scenario(
+    data_dir: str | Path, *, validate: bool = True, attributes: Sequence[str] = SEGMENT_ATTRIBUTES
+) -> Scenario:
+    """Read a data directory written by :func:`save_scenario` (ground truth optional).
+
+    ``attributes`` are the segment columns the transactions must hold: the generator's
+    by default, the dataset's own for external data (cfg.rca.attributes).
+    """
     root = Path(data_dir)
     if not root.is_dir():
         raise ValueError(f"data directory not found: {root}")
@@ -62,7 +71,7 @@ def load_scenario(data_dir: str | Path, *, validate: bool = True) -> Scenario:
         except ValueError as exc:
             raise ValueError(f"{gt_path} is not a valid ground-truth file: {exc}") from None
     if validate:
-        tx = validate_transactions(tx)
+        tx = validate_transactions(tx, attributes)
         tickets = validate_tickets(tickets)
     return Scenario(transactions=tx, tickets=tickets, ground_truth=truth)
 
@@ -129,14 +138,19 @@ def _label_column(series: pd.Series, column: str, what: str, *, allow_missing: b
     return series
 
 
-def validate_transactions(tx: pd.DataFrame) -> pd.DataFrame:
-    """Check a checkout-attempt frame; return a cleaned copy sorted by timestamp."""
+def validate_transactions(tx: pd.DataFrame, attributes: Sequence[str] = SEGMENT_ATTRIBUTES) -> pd.DataFrame:
+    """Check a checkout-attempt frame; return a cleaned copy sorted by timestamp.
+
+    The columns kept are the core ones (id, timestamp, amount, success, error_code,
+    latency_ms) plus the segment ``attributes``.
+    """
     what = "transactions"
     tx = _require_frame(tx, what)
-    _require_columns(tx, TRANSACTION_COLUMNS, what)
+    columns = ["transaction_id", "timestamp", *attributes, *CORE_TRANSACTION_COLUMNS[2:]]
+    _require_columns(tx, columns, what)
     if tx.empty:
         raise ValueError("transactions is empty; nothing to analyse")
-    out = tx[TRANSACTION_COLUMNS].copy()
+    out = tx[columns].copy()
     out["timestamp"] = _naive_utc_times(out["timestamp"], "timestamp", what)
 
     ids = _label_column(out["transaction_id"], "transaction_id", what, allow_missing=False)
@@ -144,7 +158,7 @@ def validate_transactions(tx: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"{what}.transaction_id has {int(ids.duplicated().sum())} duplicate ids")
     out["transaction_id"] = ids.astype("str")
 
-    for attr in SEGMENT_ATTRIBUTES:
+    for attr in attributes:
         out[attr] = _label_column(out[attr], attr, what, allow_missing=False).astype("category")
 
     success = out["success"]

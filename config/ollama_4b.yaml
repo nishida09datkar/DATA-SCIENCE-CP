@@ -1,0 +1,8 @@
+# Local Ollama with gemma3:4b (3.3 GB, fits a 6 GB GPU) instead of the default gemma3:1b; merged over the defaults.
+#   ollama pull gemma3:4b
+#   .venv\Scripts\python -m kpi_rca evaluate --config config/ollama_4b.yaml --scenarios 20 --with-llm --out outputs/ollama_4b
+# Free and unlimited: nothing leaves the machine.
+
+llm:
+  provider: openai_compatible
+  openai_model: gemma3:4b

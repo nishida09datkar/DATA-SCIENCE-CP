@@ -1,7 +1,9 @@
 """Narrators write the memo text; narrate_with_guardrails decides whether it may be used.
 
-Two narrators share one interface:
+Three narrators share one interface:
 - ClaudeNarrator asks Claude for a MemoNarrative through structured outputs.
+- OpenAICompatibleNarrator asks any /v1/chat/completions server (a local Ollama by
+  default, which is free) for the same MemoNarrative as JSON.
 - TemplateNarrator fills fixed sentences from the context. It needs no network
   and always passes the guardrails, so it is the fallback for every LLM failure.
 
@@ -12,6 +14,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
 
@@ -49,6 +57,14 @@ class NarratorError(Exception):
     """The narrator could not produce a memo (API error, refusal, cut-off output, ...)."""
 
 
+class InvalidMemoError(NarratorError):
+    """The narrator answered, but not with a valid MemoNarrative; the problems go back as feedback."""
+
+    def __init__(self, message: str, violations: list[str]):
+        super().__init__(message)
+        self.violations = violations
+
+
 class Narrator(Protocol):
     name: str
     model: str | None
@@ -62,7 +78,9 @@ def narrate_with_guardrails(
     """Draft, check, and redraft with the violations as feedback; fall back to the template.
 
     Never raises on an LLM failure: any NarratorError, or llm_cfg.max_retries
-    failed redrafts, ends in the template memo with the reason recorded.
+    failed redrafts, ends in the template memo with the reason recorded. An
+    InvalidMemoError (output that is not a valid memo) counts as a failed draft,
+    so its schema problems are sent back like guardrail violations.
     """
     if isinstance(narrator, TemplateNarrator):
         memo = narrator.generate(context)
@@ -82,6 +100,10 @@ def narrate_with_guardrails(
     for attempt in range(1, 2 + max(0, llm_cfg.max_retries)):
         try:
             memo = narrator.generate(context, feedback)
+        except InvalidMemoError as exc:
+            attempt_violations.append(exc.violations)
+            feedback = exc.violations
+            continue
         except NarratorError as exc:
             reason = f"attempt {attempt}: {exc}"
             break
@@ -118,9 +140,12 @@ def get_narrator(
 
     A forced "claude" without credentials raises TypeError here (from ClaudeNarrator), on
     purpose: the user asked for Claude, so a silent template memo would hide the mistake.
+    "openai_compatible" needs no key here; an unreachable server falls back memo by memo.
     """
     if cfg.provider == "template" or (cfg.provider == "auto" and not has_anthropic_credentials()):
         return TemplateNarrator()
+    if cfg.provider == "openai_compatible":
+        return OpenAICompatibleNarrator(cfg, memo_max_words=memo_max_words)
     return ClaudeNarrator(cfg, client, memo_max_words=memo_max_words)
 
 
@@ -223,6 +248,145 @@ class ClaudeNarrator:
         if response.parsed_output is None:
             raise NarratorError("Claude returned no structured memo")
         return response.parsed_output
+
+
+# --- OpenAI-compatible (Ollama, llama.cpp, vLLM, free hosted tiers) ------------------------
+
+PAID_HOSTS = ("api.openai.com", "api.anthropic.com")  # refused: the product stays free
+FREE_SUFFIX_HOSTS = ("openrouter.ai",)  # mixed free/paid catalogues: only ':free' model IDs are allowed
+RATE_LIMIT_RETRIES = 3  # free hosted tiers (e.g. Groq, 8K tokens per minute) answer 429 when busy
+RATE_LIMIT_WAIT_S = 60.0  # longest wait per 429; Retry-After is used when the server sends it
+JSON_INSTRUCTION = "\n\nReply with one JSON object and nothing else. It must match this JSON schema:\n{schema}"
+_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
+
+Post = Callable[[str, dict, dict, float], dict]  # (url, headers, body, timeout_s) -> decoded JSON reply
+
+
+def _http_post(url: str, headers: dict, body: dict, timeout_s: float) -> dict:
+    request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+class OpenAICompatibleNarrator:
+    """Asks a /v1/chat/completions server for a MemoNarrative as JSON and validates it.
+
+    Base URL and model come from LLM_BASE_URL / LLM_MODEL, else from the config. The key,
+    if the server needs one, is read from the variable named by cfg.api_key_env and only
+    goes into the Authorization header: never logged, never in an error message.
+    A 429 is waited out (Retry-After, at most RATE_LIMIT_WAIT_S) and resent up to
+    RATE_LIMIT_RETRIES times; every other HTTP error is final.
+    `post` and `sleep` replace the HTTP call and the wait in tests, so they need no network.
+    """
+
+    name = "openai_compatible"
+
+    def __init__(
+        self,
+        cfg: LLMConfig,
+        post: Post | None = None,
+        *,
+        memo_max_words: int = DEFAULT_MEMO_MAX_WORDS,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
+        self.cfg = cfg
+        self.base_url = (os.environ.get("LLM_BASE_URL") or cfg.base_url).rstrip("/")
+        self.model = os.environ.get("LLM_MODEL") or cfg.openai_model
+        host = (urllib.parse.urlparse(self.base_url).hostname or "").lower()
+        if not host:
+            raise ValueError(f"llm.base_url is not a URL: '{self.base_url}'")
+        if any(host == h or host.endswith("." + h) for h in PAID_HOSTS):
+            raise ValueError(f"{host} is a paid API; the openai_compatible narrator is for free or local servers")
+        if any(host == h or host.endswith("." + h) for h in FREE_SUFFIX_HOSTS) and not self.model.endswith(":free"):
+            raise ValueError(f"'{self.model}' on {host} may be billed; use a model ID that ends in ':free'")
+        self._api_key = os.environ.get(cfg.api_key_env) or None
+        self.post = post or _http_post
+        self.sleep = sleep
+        self.schema = MemoNarrative.model_json_schema()
+        self.system_prompt = SYSTEM_PROMPT.format(
+            headline_chars=HEADLINE_MAX_CHARS,
+            max_words=memo_max_words,
+            max_actions=MAX_ACTIONS,
+            action_words=ACTION_MAX_WORDS,
+            max_evidence=MAX_EVIDENCE,
+        ) + JSON_INSTRUCTION.format(schema=json.dumps(self.schema))
+
+    def generate(self, context: dict, feedback: list[str] | None = None) -> MemoNarrative:
+        body: dict = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": _user_message(context, feedback)},
+            ],
+            "temperature": self.cfg.temperature,
+            "max_tokens": self.cfg.max_tokens,
+        }
+        if self.cfg.response_format == "json_schema":
+            body["response_format"] = {"type": "json_schema", "json_schema": {"name": "MemoNarrative", "schema": self.schema}}
+        else:
+            body["response_format"] = {"type": "json_object"}
+        if self.cfg.effort is not None:
+            body["reasoning_effort"] = self.cfg.effort
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        response = self._send(headers, body)
+
+        try:
+            choice = response["choices"][0]
+            message = choice["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise NarratorError("the server's reply had no choices[0].message") from exc
+        if choice.get("finish_reason") == "length":
+            raise NarratorError("the model stopped early (finish_reason=length)")
+        if message.get("refusal"):
+            raise NarratorError("the model refused to write the memo")
+        content = _FENCE.sub("", (message.get("content") or "").strip())
+        try:
+            return MemoNarrative.model_validate_json(content)
+        except ValidationError as exc:
+            raise InvalidMemoError("the output did not match the MemoNarrative schema", _schema_violations(exc)) from exc
+
+    def _send(self, headers: dict, body: dict) -> dict:
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            try:
+                return self.post(f"{self.base_url}/chat/completions", headers, body, self.cfg.timeout_s)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempt < RATE_LIMIT_RETRIES:
+                    self.sleep(_retry_after_s(exc))
+                    continue
+                if exc.code == 429:
+                    raise NarratorError(f"rate limit (429) still hit after {RATE_LIMIT_RETRIES} waits") from None
+                raise NarratorError(_http_error(exc.code, self.model, self.cfg.api_key_env)) from None
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                raise NarratorError(f"could not reach {self.base_url} (connection error or timeout)") from exc
+            except ValueError as exc:  # json.JSONDecodeError
+                raise NarratorError("the server's reply was not JSON") from exc
+        raise AssertionError("unreachable")
+
+
+def _retry_after_s(exc: urllib.error.HTTPError) -> float:
+    """Seconds to wait from the Retry-After header (in seconds), else RATE_LIMIT_WAIT_S; capped."""
+    try:
+        wait = float(exc.headers.get("retry-after")) if exc.headers is not None else RATE_LIMIT_WAIT_S
+    except (TypeError, ValueError):
+        wait = RATE_LIMIT_WAIT_S
+    return min(max(wait, 1.0), RATE_LIMIT_WAIT_S)
+
+
+def _http_error(status: int, model: str, key_env: str) -> str:
+    if status in (401, 403):
+        return f"authentication failed ({status}): check {key_env}"
+    if status == 404:
+        return f"model '{model}' or the endpoint was not found (404)"
+    if status == 429:
+        return "rate limit (429)"
+    return f"server error ({status})"
+
+
+def _schema_violations(exc: ValidationError) -> list[str]:
+    return [f"schema: {'.'.join(str(p) for p in e['loc']) or 'the reply'}: {e['msg']}" for e in exc.errors()]
 
 
 def _user_message(context: dict, feedback: list[str] | None) -> str:

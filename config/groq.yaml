@@ -1,0 +1,16 @@
+# Groq free tier as the memo narrator (OpenAI-compatible API); merged over the defaults.
+# Free key: https://console.groq.com/keys. Put it in the environment, never in this file:
+#   $env:GROQ_API_KEY = "..."        (PowerShell, this session only)
+# Then:
+#   .venv\Scripts\python -m kpi_rca run --config config/groq.yaml --data data --out outputs/run_groq
+#   .venv\Scripts\python -m kpi_rca evaluate --config config/groq.yaml --scenarios 20 --with-llm --out outputs/groq
+# The free tier allows about 8K tokens per minute; a 429 is waited out (reporting/llm.py).
+
+llm:
+  provider: openai_compatible
+  base_url: https://api.groq.com/openai/v1
+  openai_model: openai/gpt-oss-120b  # supports json_schema structured outputs on Groq
+  api_key_env: GROQ_API_KEY
+  response_format: json_schema
+  effort: low                        # gpt-oss reasons before answering; low keeps it inside max_tokens
+  max_tokens: 3000                   # Groq counts max_tokens against the per-minute limit

@@ -61,7 +61,6 @@ MIN_GAP_H = 12  # hours between any two injected events
 END_MARGIN_H = 6  # no incident ends in the last hours (the replay and ticket search need room after it)
 SURGE_EARLIEST_DAY = 2  # batch STL needs a couple of days before a surge
 STREAM_PAD_H = 3  # the "incidents" stream mode replays [start - 3 h, end + 3 h)
-A4_MAX_CALLS = 10  # cap on Claude calls in ablation A4
 BR = "country=BR"  # the low-conversion country that must never be blamed
 
 ProgressFn = Callable[[str], None]
@@ -434,7 +433,7 @@ def evaluate_scenario(
         for backend, (index, build_s) in indexes.items():
             if top is None or not relevant:
                 continue
-            query = build_query(top, list(top.top_error_codes))
+            query = build_query(top, list(top.top_error_codes), cfg.retrieval)
             k = max(10, len(relevant))
             t = time.perf_counter()
             boosted = index.search(query, window.start, window.end, finding=top, k=k)
@@ -454,6 +453,11 @@ def evaluate_scenario(
             _, guard = narrate_with_guardrails(TemplateNarrator(), context, cfg.llm, cfg.reporting)
             narrate_s = time.perf_counter() - t
             row["template_guardrails_passed"] = guard.passed
+            if inc.lost_revenue:
+                # impact.py against the generator's counterfactual loss (relative error; negative = underestimate)
+                row["loss_true_usd"] = inc.lost_revenue
+                row["loss_estimated_usd"] = impact.lost_revenue
+                row["loss_rel_error"] = (impact.lost_revenue - inc.lost_revenue) / inc.lost_revenue
             contexts.append(context)
             # compute time from data to memo for this incident (batch detection + this window's stages)
             row["diagnosis_compute_s"] = detect_s + row["shap_runtime_s"] + search_s + narrate_s
@@ -576,29 +580,38 @@ def run_evaluation(
 
 
 def _run_a4(cfg: AppConfig, contexts: list[dict], with_llm: bool) -> dict:
-    """Ablation A4, context arm only: Claude on the pipeline context, scored by the guardrails."""
-    # Free-testing policy: A4 calls a paid API, so it runs only when explicitly asked for.
+    """Ablation A4, context arm only: an LLM on the pipeline context, scored by the guardrails.
+
+    The LLM is the openai_compatible narrator when llm.provider says so (free with a
+    local server), else Claude.
+    """
+    # Free-testing policy: A4 may call a paid API, so it runs only when explicitly asked for.
     if not with_llm:
         return {"status": "not run (paid API; free-testing policy; opt in with --with-llm)"}
-    has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
-    if not has_key:
-        return {"status": "skipped (no API key)"}
-    llm_cfg = cfg.llm.model_copy(update={"provider": "claude"})
+    if cfg.llm.provider == "openai_compatible":
+        llm_cfg = cfg.llm
+    else:
+        has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+        if not has_key:
+            return {"status": "skipped (no API key)"}
+        llm_cfg = cfg.llm.model_copy(update={"provider": "claude"})
     try:
         narrator = get_narrator(llm_cfg, memo_max_words=cfg.reporting.memo_max_words)
-    except TypeError as exc:
-        return {"status": f"skipped (no usable credentials: {exc})"}
+    except (TypeError, ValueError) as exc:
+        return {"status": f"skipped (no usable narrator: {exc})"}
     first, final, fallback, latency = [], [], [], []
-    for context in contexts[:A4_MAX_CALLS]:
+    for context in contexts[: cfg.evaluation.a4_max_memos]:
         t = time.perf_counter()
         _, guard = narrate_with_guardrails(narrator, context, llm_cfg, cfg.reporting)
         latency.append(time.perf_counter() - t)
         first.append(bool(guard.attempt_violations) and not guard.attempt_violations[0])
-        final.append(guard.passed)
+        final.append(guard.passed and not guard.fallback_used)  # an LLM memo that passed, not the template
         fallback.append(guard.fallback_used)
     n = len(first)
     return {
         "status": "run (context arm only; the raw-table arm needs its narrator variant)",
+        "narrator": narrator.name,
+        "model": narrator.model,
         "n_memos": n,
         "first_attempt_pass_rate": sum(first) / n if n else None,
         "final_pass_rate": sum(final) / n if n else None,
@@ -760,6 +773,11 @@ def summarise(
         "retrieval": retrieval,
         "guardrails": {"template": {"pass_rate": sum(guard) / len(guard) if guard else None, "n_memos": len(guard)}},
         "a4_llm": a4,
+        "impact": {
+            "loss_rel_error": stat(_col(df, "loss_rel_error")),
+            "loss_abs_rel_error_median": _median([abs(v) for v in _col(df, "loss_rel_error") if v is not None]),
+            "note": "estimated lost revenue vs the generator's true loss, per detected incident with a memo",
+        },
         "end_to_end": {
             "diagnosis_compute_s": stat(_col(df, "diagnosis_compute_s")),
             "note": "batch detection + RCA + index/search + template memo per incident; excludes data loading",
@@ -838,10 +856,16 @@ def render_summary(m: dict) -> str:
     lines.append(f"| Guardrails (template) | Pass rate | {_fmt(g['pass_rate'])} | 1.00 | {_met(g['pass_rate'], 1.0)} |")
     a4 = m["a4_llm"]
     if "first_attempt_pass_rate" in a4:
-        lines.append(f"| Guardrails (Claude) | First-attempt pass | {_fmt(a4['first_attempt_pass_rate'])} | >= 0.80 | "
+        lines.append(f"| Guardrails ({a4.get('model', 'Claude')}) | First-attempt pass | {_fmt(a4['first_attempt_pass_rate'])} | >= 0.80 | "
                      f"{_met(a4['first_attempt_pass_rate'], 0.8)} |")
+        lines.append(f"| Guardrails ({a4.get('model', 'Claude')}) | Pass after retries | {_fmt(a4['final_pass_rate'])} | report | |")
+        lines.append(f"| Guardrails ({a4.get('model', 'Claude')}) | Template fallback | {_fmt(a4['fallback_rate'])} | report | |")
     else:
         lines.append(f"| A4 raw / context | Hallucination rate | {a4['status']} | | |")
+    imp = m.get("impact", {})
+    if imp.get("loss_abs_rel_error_median") is not None:
+        lines.append(f"| Impact | Lost revenue relative error | {_fmt(imp['loss_rel_error'])} | report | |")
+        lines.append(f"| Impact | Median absolute relative error | {_fmt(imp['loss_abs_rel_error_median'])} | report | |")
     e2e = m["end_to_end"]["diagnosis_compute_s"]
     lines.append(f"| End-to-end (template) | Compute per incident (s) | {_fmt(e2e, 1)} | <= 60 | {_met(e2e['mean'], 60, False)} |")
 

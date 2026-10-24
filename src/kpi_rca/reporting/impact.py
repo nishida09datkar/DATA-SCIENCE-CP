@@ -1,8 +1,14 @@
 """Deterministic financial impact of an anomaly window.
 
 Every number is computed from the detector's hourly scores; the LLM only ever
-sees the result. Losses are counted per bucket and clipped at zero, so an hour
-that beats its expectation does not cancel out an hour that lost money.
+sees the result. Lost orders are counted per bucket and clipped at zero, so an
+hour that beats its expectation does not cancel out an hour that lost money.
+
+Lost revenue = lost orders x the window's average order value. Subtracting the
+fitted revenue series instead under-estimated the generator's true loss by a
+median 23% (median absolute error 49%, 18 detected incidents in 10 evaluation
+scenarios, 2026-10-23); hourly revenue is too noisy for its fit to hold a
+4-hour dip. Orders x AOV had a median error of -4% (absolute 10%).
 """
 
 from __future__ import annotations
@@ -21,8 +27,8 @@ def compute_financial_impact(
 ) -> FinancialImpact:
     rows = _window_rows(window, scores)
     expected_successes = rows["attempts"] * rows["conversion_rate_expected"]
-    lost_revenue = float((rows["revenue_expected"] - rows["revenue"]).clip(lower=0).sum())
     lost_orders = float((expected_successes - rows["successes"]).clip(lower=0).sum())
+    lost_revenue = lost_orders * _average_order_value(rows, expected_successes)
     attempts = float(rows["attempts"].sum())
     duration_hours = (window.end - window.start).total_seconds() / 3600
     return FinancialImpact(
@@ -51,6 +57,15 @@ def _window_rows(window: AnomalyWindow, scores: pd.DataFrame) -> pd.DataFrame:
     if rows.empty:
         raise ValueError(f"no score rows inside window {window.window_id} ({window.start} to {window.end})")
     return rows
+
+
+def _average_order_value(rows: pd.DataFrame, expected_successes: pd.Series) -> float:
+    """Observed revenue per success in the window; the expected one if nothing succeeded."""
+    if rows["successes"].sum() > 0:
+        return float(rows["revenue"].sum() / rows["successes"].sum())
+    if expected_successes.sum() > 0:
+        return float(rows["revenue_expected"].sum() / expected_successes.sum())
+    return 0.0
 
 
 def _severity(lost_revenue: float, cfg: ReportingConfig) -> str:

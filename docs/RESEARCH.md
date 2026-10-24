@@ -239,6 +239,7 @@ The PLAN §5 metrics map onto the literature as follows.
 - The Squeeze/PSqueeze datasets (NetManAIOps GitHub, Zenodo) and the RiskLoc synthetic sets are public multi-dimensional RCA benchmarks.
 - The UCR anomaly archive (Wu & Keogh) is a better detection benchmark than older ones such as Yahoo/NAB.
 - For a real complaint corpus, public consumer-complaint databases exist (for example the US CFPB database). It has not been reviewed here **[unverified suitability]**.
+- For semi-synthetic detection and RCA, the REES46 multi-category store event log (Kechinov, 2019) gives seven months of real view/cart/purchase sessions. It has no failures, tickets or device attributes, so only conversion drops over category, brand and price can be injected (PLAN §3.3). Licence: "Data files © Original Authors", with attribution requested.
 
 ## 5. Threats to validity
 
@@ -285,6 +286,7 @@ Author-year style. "[unverified]" marks details that could not be confirmed.
 - Johnson, J., Douze, M., Jégou, H. (2021). Billion-scale Similarity Search with GPUs. *IEEE Transactions on Big Data* 7(3):535-547. https://arxiv.org/abs/1702.08734
 - Kalander, M. (2022). RiskLoc: Localization of Multi-dimensional Root Causes by Weighted Risk. https://arxiv.org/abs/2205.10004
 - Ke, G., Meng, Q., Finley, T., Wang, T., Chen, W., Ma, W., Ye, Q., Liu, T.-Y. (2017). LightGBM: A Highly Efficient Gradient Boosting Decision Tree. *NeurIPS 30*.
+- Kechinov, M. [full name unverified; Kaggle user mkechinov] (2019). eCommerce behavior data from multi category store. Kaggle dataset, collected by the Open CDP project, REES46 Marketing Platform. https://www.kaggle.com/datasets/mkechinov/ecommerce-behavior-data-from-multi-category-store
 - Kim, S., Choi, K., Choi, H.-S., Lee, B., Yoon, S. (2022). Towards a Rigorous Evaluation of Time-Series Anomaly Detection. *AAAI 36*(7):7194-7201. https://doi.org/10.1609/aaai.v36i7.20680
 - Kumar, I.E., Venkatasubramanian, S., Scheidegger, C., Friedler, S. (2020). Problems with Shapley-value-based Explanations as Feature Importance Measures. *ICML 2020*, PMLR 119:5491-5500.
 - Lee, C., Yang, T., Chen, Z., Su, Y., Lyu, M.R. (2023). Eadro: An End-to-End Troubleshooting Framework for Microservices on Multi-source Data. *ICSE 2023*, 1750-1762. https://arxiv.org/abs/2302.05092

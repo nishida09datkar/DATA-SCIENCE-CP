@@ -116,7 +116,7 @@ Commands (install the `embeddings` and `dev` extras as the README describes; the
 .venv\Scripts\python -m kpi_rca generate --config config/default.yaml --out data
 .venv\Scripts\python -m kpi_rca run --data data --out outputs
 .venv\Scripts\python -m kpi_rca stream --data data
-.venv\Scripts\python -m kpi_rca evaluate --scenarios 20 --out outputs/evaluation
+.venv\Scripts\python -m kpi_rca evaluate --scenarios 20 --out outputs
 .venv\Scripts\python -m pytest
 ```
 
@@ -158,6 +158,18 @@ Default scenario (21 days from 2026-09-01, seed 42, about 1.8M attempts):
 
 ### 3.3 Later validation
 Types only (references in RESEARCH.md): public e-commerce logs with injected incidents (semi-synthetic), multi-dimensional RCA benchmarks from the AIOps literature, public complaint corpora for retrieval, and time-series anomaly benchmarks for detection. Run the pipeline unchanged, report the same metrics, record versions and licences, and use no personal data.
+
+**Chosen semi-synthetic source (W8, B and D; adopted 2026-10-23):** REES46 "eCommerce behavior data from multi category store" on Kaggle (`mkechinov/ecommerce-behavior-data-from-multi-category-store`).
+
+| Item | Detail |
+|---|---|
+| Content | Oct 2019-Apr 2020, one file per month (1.6-2.7 GB gzipped, about 14.7 GB in all); one row per event: `event_time, event_type, product_id, category_id, category_code, brand, price, user_id, user_session`; event types view, cart, remove_from_cart, purchase |
+| Licence | "Data files © Original Authors", not an open licence; the author asks for a link to the dataset page and to REES46. Cite both; confirm the course allows it before use |
+| Mapping | One checkout attempt = one session with a cart event; success = a purchase in that session; amount = purchase price. Attributes: top-level category from `category_code` (empty → "unknown"), `brand` (top 20, rest "other"), price band |
+| Use | **One month only.** (1) Detection on the clean month: false kpi_drop windows per day on real traffic, and STL vs MSTL with more than 6 weeks if two months are used (design note 3). (2) Inject incidents by turning purchases into non-purchases in a chosen segment and time range; score detection and RCA as in §5 |
+| Not covered | No failures, error codes or latency (a lost purchase is weaker than a failed payment); no country, OS, device, gateway or app version; **no tickets**, so retrieval is not validated here (a complaint corpus is needed for that) |
+| Code change | Done 2026-10-23 (commit `c66ed09`, still under review): `dataset: external` and `rca.attributes` in the config; the adapter is in `data/adapters.py` and the runner in `scripts/validate_rees46.py`, with `config/rees46.yaml`. It is an interface change (§8), to be reviewed by A, B and C. The raw CSVs stay out of git |
+| Priority | Optional; never at the cost of W3 validation or the W7 held-out run |
 
 ---
 
@@ -409,10 +421,10 @@ Slices meet only in `schemas.py`:
 
 | Member | Owns | Delivers | Must explain |
 |---|---|---|---|
-| **A, Team Lead** (integration, reporting, LLM, report) | `schemas.py`, `config.py`, `pipeline.py`, `cli.py`, `reporting/*`, `pyproject.toml`, README, CI; arbitrates the YAML | Adversarial guardrail tests, template memo quality, releases, edited report | Why the LLM never sees raw data, context design, number normalisation, structured outputs vs guardrails, retry, fallback, impact formulas and their noise |
+| **A, Team Lead** (ticket retrieval and reporting) | `retrieval/*`, `reporting/*`; arbitrates the YAML | Adversarial guardrail tests, template memo quality, per-backend retrieval metrics, A1, A5, free LLM narrator, releases, edited report | MiniLM, LSA, cosine as inner product, FAISS flat vs IVF/HNSW, query design, why the LLM never sees raw data, context design, number normalisation, structured outputs vs guardrails, retry, fallback, impact formulas and their noise |
 | **B, data and detection** | `data/*`, `detection/*`; scenario config | STL plots, STL vs MSTL rerun, detection metrics and delay, incident-free and red-team scenarios, recall by visibility | STL and the MSTL decision, noise scaling, MAD, IsolationForest path length and `"auto"`, direction labels, batch vs streaming, generator assumptions |
 | **C, root-cause analysis** | `rca/*` | M0 calibration, BR check, SHAP plots, brute-force agreement, A2, A3 with a scaling curve | Log-odds and `init_score`, boosting, TreeSHAP additivity, interactions, EP and purity, z-test and multiple testing, brute-force complexity |
-| **D, retrieval and evaluation** | `retrieval/*`, `evaluation.py`, ablation runners | Per-backend retrieval metrics, A1, A5, A3 distractor runs, bootstrap CIs, results tables and figures | MiniLM, LSA, cosine as inner product, FAISS flat vs IVF/HNSW, query design, P@k, R@k and its cap, seeds, bootstrap |
+| **D, integration and evaluation** | `schemas.py`, `config.py`, `pipeline.py`, `cli.py`, `evaluation.py`, ablation runners, `pyproject.toml`, README, CI, docs | A3 distractor runs, bootstrap CIs, results tables and figures, held-out run, final demo | Pipeline stages and timings, interface rule, P@k, R@k and its cap, seeds, bootstrap, the demo script |
 
 ---
 
