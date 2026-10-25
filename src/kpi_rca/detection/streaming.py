@@ -60,6 +60,7 @@ from kpi_rca.detection.detector import (
     fit_isolation_forest,
     if_features,
     make_window,
+    point_reason,
     residual_zscores,
     robust_z,
     stabilised_residuals,
@@ -94,9 +95,10 @@ class StreamResult:
 
 def bucket_step(freq: str) -> pd.Timedelta:
     try:
-        return pd.Timedelta(to_offset(freq))
-    except ValueError as exc:
+        nanos = to_offset(freq).nanos
+    except (ValueError, AttributeError) as exc:
         raise ValueError(f"detection.freq {freq!r} must be a fixed-length offset for streaming") from exc
+    return pd.Timedelta(nanos, unit="ns")
 
 
 @dataclass
@@ -223,22 +225,42 @@ class StreamingDetector:
                 forest = fit_isolation_forest(self._training_features(kpis, refit_at), self.cfg)
                 fitted_at = refit_at
             expected, z = self._live_bucket(kpis, i)
+            # First difference feature: before appending the new z, compare with the
+            # previous bucket's z (0.0 at the very start, as if_features does for row 0).
+            diff = np.zeros_like(z) if not recent_z else z - recent_z[-1]
             recent_z = (recent_z + [z])[-window:]
             rolling = np.mean(recent_z, axis=0)  # trailing mean of the live z-scores
 
-            # Same feature layout as if_features: [z..., rolling mean of z...]
-            score = float(forest.decision_function(np.hstack([z, rolling]).reshape(1, -1))[0])
-            flagged = score < 0  # IsolationForest.predict == -1 exactly when decision_function < 0
+            # Same feature layout as if_features: [z..., rolling mean of z..., diff of z...]
+            score = float(forest.decision_function(np.hstack([z, rolling, diff]).reshape(1, -1))[0])
+            # The batch flag rule (combine_signals): flag when the forest isolates the
+            # bucket (predict == -1 exactly when decision_function < 0) AND the largest
+            # |residual z| reaches min_gate_z, or when that residual is extreme on its own.
+            max_abs = float(np.max(np.abs(np.nan_to_num(z, nan=0.0))))
+            if_flagged = score < 0
+            flagged = bool(max_abs >= self.cfg.extreme_z or (if_flagged and max_abs >= self.cfg.min_gate_z))
             signals = pd.DataFrame([z + rolling], columns=Z_COLUMNS)  # as direction_signals
             label = str(direction_labels(signals, [flagged])[0])
+            reason_text = (
+                point_reason(
+                    z,
+                    z + rolling,
+                    score,
+                    kpis[list(KPI_COLUMNS)].to_numpy(dtype=float)[i],
+                    np.array([expected[f"{k}_expected"] for k in KPI_COLUMNS]),
+                    kind=label,
+                )
+                if flagged
+                else ""
+            )
             row: dict[str, object] = {"bucket": index[i]}
-            for col in ("attempts", "successes", "failures", "conversion_rate", "revenue", "avg_latency_ms"):
+            for col in ("attempts", "successes", "failures", "conversion_rate", "revenue", "avg_latency_ms", "imputed"):
                 if col in kpis.columns:
                     row[col] = kpis[col].iloc[i]
             for n, kpi in enumerate(KPI_COLUMNS):
                 row[f"{kpi}_expected"] = expected[f"{kpi}_expected"]
                 row[f"{kpi}_resid_z"] = float(z[n])  # Z_COLUMNS follows KPI_COLUMNS order
-            row.update(if_score=score, is_anomaly=flagged, label=label)
+            row.update(if_score=score, anomaly_score=-score, is_anomaly=flagged, label=label, reason=reason_text)
             rows.append(row)
 
             confirmed, _closed = tracker.push(len(rows) - 1, label)
@@ -285,7 +307,7 @@ def _empty_scores(kpis: pd.DataFrame) -> pd.DataFrame:
     columns = list(kpis.columns)
     for kpi in KPI_COLUMNS:
         columns += [f"{kpi}_expected", f"{kpi}_resid_z"]
-    columns += ["if_score", "is_anomaly", "label"]
+    columns += ["if_score", "anomaly_score", "is_anomaly", "label", "reason"]
     return pd.DataFrame(columns=columns, index=pd.DatetimeIndex([], name="bucket"))
 
 

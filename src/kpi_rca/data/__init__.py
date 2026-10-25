@@ -12,3 +12,6 @@ __all__ = [
     "validate_tickets",
     "validate_transactions",
 ]
+
+from kpi_rca.data.ecom_kaggle import load_kaggle_ecom_hourly, KaggleEcomLoader, build_kpi_frame_for_pipeline, validate_ecom_kpis  # noqa: F401
+

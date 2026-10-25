@@ -10,10 +10,14 @@ import pytest
 
 from conftest import SMALL_INCIDENT_START, SMALL_SURGE_START
 from kpi_rca.config import DetectionConfig
-from kpi_rca.detection import StreamingDetector, aggregate_kpis, detect_anomalies, detection_delays
+from kpi_rca.detection import StreamingDetector, aggregate_kpis, detect_anomalies, detection_delays, preprocess_kpis
 from kpi_rca.detection.detector import (
+    InsufficientDataError,
+    InvalidKPIError,
     Z_COLUMNS,
+    combine_signals,
     direction_labels,
+    fit_isolation_forest,
     group_windows,
     robust_z,
     uses_mstl,
@@ -240,3 +244,250 @@ def test_detection_delays_matching():
     a, b = detection_delays(windows, incidents)
     assert (a.detected, a.window_id, a.delay_h) == (True, "S-1", 3.0)
     assert (b.detected, b.delay_h) == (False, None)  # a surge window never counts as detection
+
+
+# ------------------------------------------------- preprocessing and validation
+
+
+def test_aggregate_kpis_marks_imputed_buckets():
+    kpis = aggregate_kpis(_tiny_transactions())
+    # only the empty 01:00 bucket needed interpolation (conversion and latency)
+    assert kpis["imputed"].tolist() == [False, True, False]
+
+
+def test_aggregate_kpis_merges_duplicate_rows_by_bucket():
+    tx = _tiny_transactions()
+    extra = tx.iloc[[1]].copy()
+    extra["success"], extra["amount"] = 1, 5.0  # a second attempt in the same bucket
+    kpis = aggregate_kpis(pd.concat([tx, extra]))
+    # documented rule: counts and revenue sum, conversion recomputes on the merged bucket
+    assert kpis["attempts"].tolist()[0] == 3 and kpis["successes"].tolist()[0] == 2
+    assert kpis["revenue"].tolist()[0] == 15.0
+    assert kpis["conversion_rate"].tolist()[0] == pytest.approx(2 / 3)
+
+
+def test_preprocess_kpis_merges_duplicate_buckets_and_sorts():
+    index = pd.DatetimeIndex(
+        ["2026-09-01 01:00", "2026-09-01 00:00", "2026-09-01 00:00"], name="bucket"
+    )
+    frame = pd.DataFrame(
+        {
+            "attempts": [1, 2, 3],
+            "successes": [1, 2, 1],
+            "conversion_rate": [1.0, 1.0, 1.0 / 3.0],
+            "revenue": [10.0, 20.0, 5.0],
+            "avg_latency_ms": [100.0, 200.0, 400.0],
+            "imputed": [False, False, False],
+        },
+        index=index,
+    )
+    out = preprocess_kpis(frame)
+    assert list(out.index) == list(pd.date_range("2026-09-01 00:00", periods=2, freq="h"))
+    assert out["attempts"].tolist() == [5, 1]
+    assert out["successes"].tolist() == [3, 1]
+    assert out["failures"].tolist() == [2, 0]
+    # conversion is recomputed from the merged counts, not averaged from the rates
+    assert out["conversion_rate"].tolist() == [0.6, 1.0]
+    assert out["revenue"].tolist() == [25.0, 10.0]
+    assert out["avg_latency_ms"].tolist() == [300.0, 100.0]
+
+
+def test_preprocess_kpis_interpolates_and_flags_missing_rates():
+    index = pd.date_range("2026-09-01", periods=3, freq="h", name="bucket")
+    frame = pd.DataFrame(
+        {
+            "attempts": [10, 0, 10],
+            "successes": [9, 0, 10],
+            "conversion_rate": [0.9, np.nan, 1.0],
+            "revenue": [10.0, 0.0, 20.0],
+            "avg_latency_ms": [100.0, np.nan, 200.0],
+        },
+        index=index,
+    )
+    out = preprocess_kpis(frame)
+    assert out["conversion_rate"].tolist() == [0.9, 0.95, 1.0]
+    assert out["avg_latency_ms"].tolist() == [100.0, 150.0, 200.0]
+    assert out["imputed"].tolist() == [False, True, False]
+    assert out["attempts"].tolist() == [10, 0, 10]  # counts stay 0, they are not invented
+
+
+def test_preprocess_kpis_rejects_impossible_values():
+    index = pd.date_range("2026-09-01", periods=3, freq="h", name="bucket")
+    base = pd.DataFrame(
+        {
+            "attempts": [10, 10, 10],
+            "successes": [9, 9, 9],
+            "conversion_rate": [0.9, 0.9, 0.9],
+            "revenue": [10.0, 10.0, 10.0],
+            "avg_latency_ms": [100.0, 100.0, 100.0],
+        },
+        index=index,
+    )
+    with pytest.raises(InvalidKPIError, match="conversion_rate values outside"):
+        bad = base.copy()
+        bad["conversion_rate"] = [0.9, 1.5, 0.9]
+        preprocess_kpis(bad)
+    with pytest.raises(InvalidKPIError, match="negative"):
+        bad = base.copy()
+        bad["revenue"] = [10.0, -1.0, 10.0]
+        preprocess_kpis(bad)
+    with pytest.raises(InvalidKPIError, match="NaN or infinite"):
+        bad = base.copy()
+        bad["revenue"] = [10.0, np.inf, 10.0]
+        preprocess_kpis(bad)
+    with pytest.raises(InvalidKPIError, match="missing columns"):
+        preprocess_kpis(base.drop(columns="conversion_rate"))
+    with pytest.raises(InvalidKPIError, match="DatetimeIndex"):
+        preprocess_kpis(base.reset_index(drop=True))
+
+
+def _kpi_frame(rng: np.random.Generator, hours: int = 120) -> pd.DataFrame:
+    """A clean hourly KPI series: attempts like traffic, sensible conversion and revenue."""
+    index = pd.date_range("2026-09-01", periods=hours, freq="h", name="bucket")
+    attempts = rng.poisson(500 + 50 * np.sin(2 * np.pi * index.hour / 24))
+    conversion = np.clip(0.86 + 0.04 * np.cos(2 * np.pi * (index.hour - 15) / 24) + rng.normal(0, 0.004, hours), 0, 1)
+    successes = np.round(attempts * conversion).astype(int)
+    revenue = successes * 40.0 * (1 + rng.normal(0, 0.02, hours))
+    return pd.DataFrame(
+        {
+            "attempts": attempts,
+            "successes": successes,
+            "failures": attempts - successes,
+            "conversion_rate": conversion,
+            "revenue": revenue,
+            "avg_latency_ms": np.full(hours, 420.0),
+        },
+        index=index,
+    )
+
+
+def test_detection_interpolates_missing_values_and_marks_them_imputed():
+    rng = np.random.default_rng(7)
+    kpis = _kpi_frame(rng)
+    neighbours = (kpis["conversion_rate"].iloc[19] + kpis["conversion_rate"].iloc[22]) / 2
+    kpis.iloc[20:22, kpis.columns == "conversion_rate"] = np.nan
+    det = detect_anomalies(kpis, DetectionConfig())
+    filled = det.scores.loc[det.scores["imputed"], "conversion_rate"]
+    assert list(filled.index) == [kpis.index[20], kpis.index[21]]
+    # the interpolated values sit between their neighbours: no invention, no exception
+    assert min(filled) > neighbours - 0.01 and max(filled) < neighbours + 0.01
+    assert np.isfinite(det.scores["conversion_rate_resid_z"]).all()
+
+
+def test_edge_gap_in_a_kpi_frame_is_still_scored():
+    rng = np.random.default_rng(8)
+    kpis = _kpi_frame(rng)
+    kpis.iloc[:2, kpis.columns == "conversion_rate"] = np.nan  # edge gap: nearest value carried back
+    det = detect_anomalies(kpis, DetectionConfig())
+    assert det.scores["imputed"].head(2).all()
+    assert len(det.scores) == 120
+
+
+def test_insufficient_data_raises_a_typed_descriptive_error():
+    rng = np.random.default_rng(9)
+    kpis = _kpi_frame(rng, hours=30)
+    with pytest.raises(InsufficientDataError, match="two full seasonal periods.*got 30"):
+        detect_anomalies(kpis, DetectionConfig())
+
+
+def test_constant_series_is_never_anomalous():
+    index = pd.date_range("2026-09-01", periods=60, freq="h", name="bucket")
+    kpis = pd.DataFrame(
+        {
+            "attempts": np.full(60, 500, dtype=np.int64),
+            "successes": np.full(60, 430, dtype=np.int64),
+            "failures": np.full(60, 70, dtype=np.int64),
+            "conversion_rate": np.full(60, 0.86),
+            "revenue": np.full(60, 17200.0),
+            "avg_latency_ms": np.full(60, 420.0),
+        },
+        index=index,
+    )
+    det = detect_anomalies(kpis, DetectionConfig())
+    assert not det.scores["is_anomaly"].any()
+    assert det.windows == []
+    assert np.isfinite(det.scores["anomaly_score"]).all()
+
+
+def test_detection_is_reproducible_for_a_fixed_seed():
+    rng = np.random.default_rng(11)
+    kpis = _kpi_frame(rng)
+    first = detect_anomalies(kpis, DetectionConfig())
+    second = detect_anomalies(kpis, DetectionConfig())
+    pd.testing.assert_frame_equal(first.scores, second.scores)
+    assert first.windows == second.windows
+
+
+def test_anomaly_score_is_higher_for_more_anomalous():
+    rng = np.random.default_rng(12)
+    kpis = _kpi_frame(rng)
+    kpis.iloc[60:64, kpis.columns == "conversion_rate"] = 0.2  # a 4-hour drop
+    det = detect_anomalies(kpis, DetectionConfig())
+    scores = det.scores
+    assert (scores["anomaly_score"] == -scores["if_score"]).all()
+    flagged = scores["anomaly_score"][scores["is_anomaly"]]
+    normal = scores["anomaly_score"][~scores["is_anomaly"]]
+    assert flagged.min() > normal.quantile(0.5)
+    assert flagged.max() == scores["anomaly_score"].max()
+
+
+def test_flagged_points_carry_a_human_readable_reason():
+    rng = np.random.default_rng(13)
+    kpis = _kpi_frame(rng)
+    kpis.iloc[60:64, kpis.columns == "conversion_rate"] = 0.5
+    det = detect_anomalies(kpis, DetectionConfig())
+    scores = det.scores
+    assert (scores.loc[~scores["is_anomaly"], "reason"] == "").all()
+    flagged = scores.loc[scores["is_anomaly"], "reason"]
+    assert flagged.str.contains("MAD").all() and flagged.str.contains("IF score").all()
+    sample = flagged.iloc[0]
+    assert "conversion_rate" in sample and "seasonal expectation" in sample
+
+
+def test_combine_signals_agrees_or_requires_one_extreme():
+    cfg = DetectionConfig()  # min_gate_z 3.0, extreme_z 6.0
+    index = pd.date_range("2026-09-01", periods=4, freq="h", name="bucket")
+    z = pd.DataFrame(
+        {"conversion_rate_resid_z": [0.1, -4.0, -0.5, 7.0], "revenue_resid_z": 0.0, "attempts_resid_z": 0.0},
+        index=index,
+    )
+    if_flagged = np.array([True, True, False, False])
+    # forest flags AND |z| >= 3 -> agree; forest flags but |z| < 3 -> gated away;
+    # |z| >= 6 without the forest -> the extreme clause keeps it
+    assert combine_signals(if_flagged, z, cfg).tolist() == [False, True, False, True]
+
+
+def test_contamination_is_configurable():
+    cfg = DetectionConfig(contamination=0.05)
+    rng = np.random.default_rng(14)
+    model = fit_isolation_forest(rng.normal(size=(300, 3 * 2)), cfg)
+    assert model.contamination == 0.05  # default is "auto"; a number passes through to sklearn
+    assert model.n_estimators == cfg.n_estimators and model.random_state == cfg.random_state
+    det = detect_anomalies(_kpi_frame(np.random.default_rng(15)), cfg)
+    assert det.scores["is_anomaly"].dtype == bool  # scores with a fixed contamination are usable
+
+
+def test_period_is_inferred_from_the_frequency():
+    assert DetectionConfig().period == 24
+    assert DetectionConfig(freq="1D").period == 7
+    assert DetectionConfig(freq="15min").period == 96
+    with pytest.raises(ValueError, match="cannot infer"):
+        DetectionConfig(freq="W")
+
+
+def test_weekly_period_defaults_to_seven_daily_periods():
+    assert DetectionConfig().weekly_period == 168
+    assert DetectionConfig(freq="1D").weekly_period == 49
+    assert DetectionConfig(period=24, weekly_period=168).weekly_period == 168
+
+
+def test_window_summary_fields(small_detection):
+    drops = [w for w in small_detection.windows if w.kpi_type == "kpi_drop"]
+    assert drops and all(w.reason for w in small_detection.windows)
+    assert all(w.duration_hours == w.n_buckets for w in small_detection.windows)
+    assert all(w.peak_anomaly_score > 0 for w in small_detection.windows)
+    assert all(w.drop_pct is not None and w.drop_pct > 0 for w in drops)  # below seasonal expectation
+    scores = small_detection.scores
+    for w in small_detection.windows:
+        rows = scores.loc[(scores.index >= w.start) & (scores.index < w.end)]
+        assert w.peak_anomaly_score == pytest.approx(rows["anomaly_score"].max())

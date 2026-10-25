@@ -413,10 +413,37 @@ class DataConfig(_Model):
 # ---------------------------------------------------------------------- detection
 
 
+def infer_period(freq: str) -> int:
+    """Seasonal period in buckets, derived from the bucket size (documented mapping).
+
+    Intraday buckets carry a daily seasonality (1h -> 24, 15min -> 96); daily buckets
+    carry a weekly seasonality (1D -> 7). Anything else (odd-day multiples like 7D, weekly
+    buckets) has no obvious cycle, so the caller must set ``detection.period`` explicitly.
+    Raises ValueError for such a frequency or for a non-fixed-length offset.
+    """
+    import pandas as pd
+    from pandas.tseries.frequencies import to_offset
+
+    try:
+        nanos = to_offset(freq).nanos  # only fixed-length ticks (Hour, Day, 15min...) have nanos
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"cannot infer detection.period from freq {freq!r}; set it explicitly") from exc
+    if nanos == pd.Timedelta(days=1).value:
+        return 7  # one bucket per day: the weekly cycle is the shortest useful seasonality
+    per_day = pd.Timedelta(days=1).value / nanos
+    if per_day >= 1 and abs(per_day - round(per_day)) < 1e-9:
+        return int(round(per_day))  # intraday series: daily seasonality in buckets
+    raise ValueError(f"cannot infer detection.period from freq {freq!r}; set it explicitly")
+
+
 class DetectionConfig(_Model):
     freq: str = "1h"  # KPI bucket size (pandas offset alias)
-    period: int = Field(default=24, ge=2)  # daily seasonality in buckets
-    weekly_period: int = Field(default=168, ge=2)  # weekly seasonality in buckets
+    # Seasonal period in buckets. None = inferred from freq (see infer_period: hourly
+    # buckets -> 24, daily buckets -> 7). The validator resolves None to the inferred
+    # value, so ``DetectionConfig().period == 24`` for the default hourly bucket.
+    period: int | None = Field(default=None, ge=2)
+    # Weekly seasonality in buckets. None = 7 * period (the default daily cycle x 7).
+    weekly_period: int | None = Field(default=None, ge=2)
     # STL seasonal smoother length in cycles (odd). Wider than statsmodels' default 7 so the
     # daily shape is estimated from ~3 weeks of the same hour instead of overfitting noise.
     stl_seasonal: int = Field(default=21, ge=7)
@@ -430,6 +457,16 @@ class DetectionConfig(_Model):
     # (measurements in kpi_rca.detection.detector, next to uses_mstl).
     mstl_min_weeks: float = Field(default=6.0, ge=2)
     rolling_window: int = Field(default=3, ge=1)  # trailing rolling mean of residual z-scores (IF features)
+    # Isolation Forest contamination. "auto" is the paper's fixed rule (score > 0.5 flags);
+    # a number in [0, 0.5] flags that share of buckets (score-sklearn offset).
+    contamination: float | Literal["auto"] = "auto"
+    # Flag rule (see kpi_rca.detection.detector.combine_signals): a bucket is flagged when
+    # the forest isolates it AND the largest |residual z| reaches min_gate_z, or when the
+    # largest |residual z| itself reaches extreme_z even where the forest did not isolate
+    # it. Both thresholds are on the already-data-driven robust z scale (1.4826*MAD units),
+    # not on KPI values, so they transfer across series with different noise levels.
+    min_gate_z: float = Field(default=3.0, gt=0)
+    extreme_z: float = Field(default=6.0, gt=0)
     n_estimators: int = Field(default=200, ge=10)
     random_state: int = 42
     min_window_buckets: int = Field(default=2, ge=1)  # debounce: a window needs this many flagged buckets
@@ -451,6 +488,23 @@ class DetectionConfig(_Model):
         except ValueError as exc:
             raise ValueError(f"detection.freq {v!r} is not a pandas offset alias") from exc
         return v
+
+    @field_validator("contamination")
+    @classmethod
+    def _contamination_ok(cls, v):
+        if isinstance(v, str):
+            return v
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0 <= v <= 0.5):
+            raise ValueError("detection.contamination must be 'auto' or a number in [0, 0.5]")
+        return float(v)
+
+    @model_validator(mode="after")
+    def _resolve_periods(self) -> "DetectionConfig":
+        if self.period is None:
+            self.period = infer_period(self.freq)
+        if self.weekly_period is None:
+            self.weekly_period = 7 * self.period
+        return self
 
     @field_validator("stl_seasonal")
     @classmethod

@@ -40,15 +40,39 @@ from sklearn.ensemble import IsolationForest
 from statsmodels.tsa.seasonal import MSTL, STL
 
 from kpi_rca.config import DetectionConfig
+from kpi_rca.detection.kpi import preprocess_kpis
 from kpi_rca.schemas import KPI_COLUMNS, AnomalyWindow, DetectionResult
 
 log = logging.getLogger(__name__)
 
 MAD_SCALE = 1.4826
+FLOAT_NOISE_REL = 1e-9  # differences below this relative size are log/exp roundtrip noise
 LABELS = ("normal", "kpi_drop", "volume_surge")
 Z_COLUMNS = [f"{k}_resid_z" for k in KPI_COLUMNS]
 EXPECTED_COLUMNS = [f"{k}_expected" for k in KPI_COLUMNS]
 WEEKLY_SEASONAL_WINDOW = 101  # MSTL weekly smoother length in weeks (odd, > any history)
+
+
+# --------------------------------------------------------------- typed errors
+
+
+class InvalidKPIError(ValueError):
+    """A KPI frame cannot be scored: missing columns, unsorted index, bad or duplicate values.
+
+    Subclass of ValueError, so callers that catch ValueError keep working.
+    """
+
+
+class InsufficientDataError(ValueError):
+    """Not enough observations for the decomposition (STL needs two full seasonal periods)."""
+
+
+class ConstantSeriesError(ValueError):
+    """Series is constant and cannot be decomposed for anomaly detection."""
+
+
+class NaNSeriesError(ValueError):
+    """Series contains NaN or infinite values."""
 
 
 # ------------------------------------------------------------- decomposition
@@ -81,32 +105,35 @@ def uses_mstl(n_buckets: int, cfg: DetectionConfig) -> bool:
     return n_buckets >= cfg.mstl_min_weeks * cfg.weekly_period
 
 
-def decompose(values: np.ndarray, cfg: DetectionConfig) -> tuple[np.ndarray, np.ndarray]:
-    """(trend, seasonal) of a series: robust STL, or MSTL with enough weeks (see uses_mstl)."""
+def _check_series(values: np.ndarray) -> None:
+    arr = np.asarray(values, dtype=float).ravel()
+    if arr.size == 0:
+        raise InsufficientDataError("series is empty")
+    if not np.all(np.isfinite(arr)):
+        raise NaNSeriesError("series contains NaN or infinite values")
+    if np.allclose(arr, arr[0]):
+        raise ConstantSeriesError("series is constant")
+
+
+
+
+def decompose(values, cfg):
+    """(trend, seasonal) of a series: robust STL, or MSTL with enough weeks."""
+    _check_series(values)
     n = values.shape[0]
     if n < 2 * cfg.period + 1:
-        raise ValueError(
-            f"need at least {2 * cfg.period + 1} buckets (two full daily cycles) to decompose, got {n}"
-        )
+        raise InsufficientDataError(f"need at least {2 * cfg.period + 1} buckets (two full seasonal periods of {cfg.period} buckets) for STL, got {n}; collect more history or lower detection.period")
     if uses_mstl(n, cfg):
-        # MSTL(24, 168) with flat (degree-0) seasonal smoothers: statsmodels' default
-        # windows (7, 11) with local-linear smoothing follow the noise of the few weekly
-        # cycles. The weekly window exceeds any realistic history, so each hour of the week
-        # gets one robust level across all weeks.
-        result = MSTL(
-            values,
-            periods=(cfg.period, cfg.weekly_period),
-            windows=(cfg.stl_seasonal, WEEKLY_SEASONAL_WINDOW),
-            stl_kwargs={"robust": True, "seasonal_deg": 0},
-        ).fit()
+        from statsmodels.tsa.seasonal import MSTL
+        result = MSTL(values, periods=(cfg.period, cfg.weekly_period), windows=(cfg.stl_seasonal, WEEKLY_SEASONAL_WINDOW), stl_kwargs={"robust": True, "seasonal_deg": 0}).fit()
         seasonal = np.asarray(result.seasonal, dtype=float)
         if seasonal.ndim == 2:
             seasonal = seasonal.sum(axis=1)
     else:
+        from statsmodels.tsa.seasonal import STL
         result = STL(values, period=cfg.period, seasonal=cfg.stl_seasonal, trend=stl_trend_window(cfg), robust=True).fit()
         seasonal = np.asarray(result.seasonal, dtype=float)
     return np.asarray(result.trend, dtype=float), seasonal
-
 
 def _trend_plus_seasonal(values: np.ndarray, cfg: DetectionConfig) -> np.ndarray:
     trend, seasonal = decompose(values, cfg)
@@ -126,15 +153,72 @@ def decomposition_name(n_buckets: int, cfg: DetectionConfig) -> str:
     return f"STL({cfg.period})"
 
 
+def auto_period_from_freq(freq: str | pd.tseries.offsets.BaseOffset) -> int:
+    try:
+        if isinstance(freq, str):
+            off = pd.tseries.frequencies.to_offset(freq)
+        else:
+            off = freq
+        if off is None:
+            return 24
+        name = getattr(off, "name", str(off)).lower()
+        if "h" in name or "hour" in name:
+            return 24
+        if "d" in name or "day" in name:
+            return 7
+        if "w" in name or "week" in name:
+            return 168
+    except Exception:
+        pass
+    return 24
+
+
+def resolve_period(cfg: DetectionConfig, index: pd.DatetimeIndex | None = None, allow_weekly: bool = False) -> int:
+    period = int(getattr(cfg, "period", 24))
+    if index is not None and hasattr(index, "freq") and index.freq is not None:
+        inferred = auto_period_from_freq(index.freq)
+        if period == 24 and inferred == 7:
+            period = 7
+        elif period == 24 and inferred == 168:
+            period = 168
+        elif inferred == 168 and allow_weekly:
+            period = 168
+    if allow_weekly and period == 24:
+        period = 168
+    return period
+
+
 def expected_kpis(kpis: pd.DataFrame, cfg: DetectionConfig) -> pd.DataFrame:
     """Expected value of every KPI in KPI_COLUMNS from its trend + seasonal components."""
     out = {}
     conversion = kpis["conversion_rate"].to_numpy(dtype=float)
-    out["conversion_rate_expected"] = np.clip(_trend_plus_seasonal(conversion, cfg), 1e-6, 1 - 1e-6)
+    try:
+        conv_exp = _trend_plus_seasonal(conversion, cfg)
+    except ConstantSeriesError:
+        conv_exp = conversion.copy()
+    out["conversion_rate_expected"] = np.clip(conv_exp, 1e-6, 1 - 1e-6)
     for kpi in ("revenue", "attempts"):
-        fit = _trend_plus_seasonal(np.log1p(kpis[kpi].to_numpy(dtype=float)), cfg)
-        out[f"{kpi}_expected"] = np.maximum(np.expm1(fit), 0.0)
+        try:
+            fit = _trend_plus_seasonal(np.log1p(kpis[kpi].to_numpy(dtype=float)), cfg)
+            out[f"{kpi}_expected"] = np.maximum(np.expm1(fit), 0.0)
+        except ConstantSeriesError:
+            out[f"{kpi}_expected"] = kpis[kpi].to_numpy(dtype=float).copy()
     return pd.DataFrame(out, index=kpis.index)[EXPECTED_COLUMNS]
+
+
+def _real_diff(value: np.ndarray, expected: np.ndarray) -> np.ndarray:
+    """value - expected, with differences below FLOAT_NOISE_REL*max(|value|) zeroed out.
+
+    The back-transformed expected values (expm1 of an STL fit on log1p) carry ~1e-15
+    floating-point error. On an exactly constant series that error is ALL the residual:
+    a residual MAD around 1e-10 would rescale pure roundtrip noise to |z| around 19 and
+    the forest would flag its artifacts. Real deviations are many orders of magnitude
+    larger, so the threshold only acts where there is no signal at all.
+    """
+    diff = np.asarray(value, dtype=float) - np.asarray(expected, dtype=float)
+    tiny = np.abs(diff) <= FLOAT_NOISE_REL * np.maximum(np.abs(value), np.abs(expected))
+    diff[tiny] = 0.0
+    return diff
 
 
 def stabilised_residuals(kpis: pd.DataFrame, expected: pd.DataFrame) -> pd.DataFrame:
@@ -146,23 +230,36 @@ def stabilised_residuals(kpis: pd.DataFrame, expected: pd.DataFrame) -> pd.DataF
     scale = np.sqrt(np.maximum(expected["attempts_expected"].to_numpy(dtype=float), 1.0))
     raw = {
         "conversion_rate_resid_z": conversion,
-        "revenue_resid_z": (kpis["revenue"].to_numpy(dtype=float) - expected["revenue_expected"].to_numpy()) / scale,
-        "attempts_resid_z": (attempts - expected["attempts_expected"].to_numpy()) / scale,
+        "revenue_resid_z": _real_diff(kpis["revenue"].to_numpy(dtype=float), expected["revenue_expected"].to_numpy())
+        / scale,
+        "attempts_resid_z": _real_diff(attempts, expected["attempts_expected"].to_numpy()) / scale,
     }
     return pd.DataFrame(raw, index=kpis.index)[Z_COLUMNS]
 
 
-def robust_z(values: np.ndarray, reference: np.ndarray | None = None) -> np.ndarray:
-    """(x - median) / (1.4826 * MAD), with median and MAD taken from ``reference`` (default: x)."""
-    values = np.asarray(values, dtype=float)
-    ref = values if reference is None else np.asarray(reference, dtype=float)
-    med = float(np.nanmedian(ref))
-    mad = float(np.nanmedian(np.abs(ref - med))) * MAD_SCALE
+def robust_residual_zscore(residual: np.ndarray, reference: np.ndarray | None = None, mask_valid: np.ndarray | None = None) -> np.ndarray:
+    residual = np.asarray(residual, dtype=float)
+    ref = residual if reference is None else np.asarray(reference, dtype=float)
+    if mask_valid is not None:
+        mv = np.asarray(mask_valid, dtype=bool)
+        if mv.any():
+            ref_use = ref[mv]
+        else:
+            ref_use = ref
+    else:
+        ref_use = ref
+    med = float(np.nanmedian(ref_use))
+    mad = float(np.nanmedian(np.abs(ref_use - med))) * MAD_SCALE
     if not np.isfinite(mad) or mad < 1e-12:
-        sd = float(np.nanstd(ref))
+        sd = float(np.nanstd(ref_use))
         mad = sd if np.isfinite(sd) and sd > 1e-12 else 1.0
-    return (values - med) / mad
+    return (residual - med) / mad
 
+
+
+
+def robust_z(values, reference=None):
+    return robust_residual_zscore(values, reference=reference)
 
 def residual_zscores(kpis: pd.DataFrame, expected: pd.DataFrame) -> pd.DataFrame:
     raw = stabilised_residuals(kpis, expected)
@@ -173,18 +270,95 @@ def residual_zscores(kpis: pd.DataFrame, expected: pd.DataFrame) -> pd.DataFrame
 
 
 def if_features(z: pd.DataFrame, rolling_window: int) -> np.ndarray:
-    """IF inputs: the robust z-scores and their trailing rolling means (causal)."""
+    """IF inputs, derived from the STL residual via its robust z-scores (documented layout).
+
+    Three blocks, stacked in this order and always built through this function so batch
+    and streaming never diverge:
+
+    1. the robust z-scores themselves (residual in 1.4826*MAD units);
+    2. their trailing rolling mean (causal; keeps a strong anomaly visible for up to
+       ``rolling_window - 1`` buckets after it ends);
+    3. their first difference (how fast the residual is moving; separates the start of a
+       drop, where the residual plunges, from a stable tail inside it).
+    """
     zz = z[Z_COLUMNS]
     rolling = zz.rolling(rolling_window, min_periods=1).mean()
-    return np.hstack([zz.to_numpy(dtype=float), rolling.to_numpy(dtype=float)])
+    diff = zz.diff().fillna(0.0)
+    return np.hstack([zz.to_numpy(dtype=float), rolling.to_numpy(dtype=float), diff.to_numpy(dtype=float)])
 
 
 def fit_isolation_forest(features: np.ndarray, cfg: DetectionConfig) -> IsolationForest:
-    model = IsolationForest(n_estimators=cfg.n_estimators, contamination="auto", random_state=cfg.random_state)
+    model = IsolationForest(
+        n_estimators=cfg.n_estimators,
+        contamination=cfg.contamination,
+        random_state=cfg.random_state,
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)  # feature-name warnings on plain arrays
         model.fit(features)
     return model
+
+
+def max_abs_z(z: pd.DataFrame | np.ndarray) -> np.ndarray:
+    """Largest absolute robust z over the KPIs of each bucket (NaN counts as 0)."""
+    values = np.asarray(z, dtype=float)
+    values = values if values.ndim == 2 else values.reshape(1, -1)
+    absz = np.abs(np.nan_to_num(values, nan=0.0))
+    return absz.max(axis=1)
+
+
+def combine_signals(flagged_if: np.ndarray, z: pd.DataFrame, cfg: DetectionConfig) -> np.ndarray:
+    """The documented IF+STL flag rule (data-driven thresholds, no KPI-value cut-offs).
+
+    A bucket is flagged when the Isolation Forest isolates it AND the largest |residual
+    z| reaches ``min_gate_z`` (the two signals agree), OR when the largest |residual z|
+    itself reaches ``extreme_z`` even where the forest did not isolate it (one signal is
+    extreme). Both thresholds live on the robust z scale (1.4826*MAD units), which is
+    derived from the series' own median residual scale, so no constant sits on KPI
+    values; the gate removes the low-z noise that contamination="auto" flags in any long
+    series, and the extreme clause keeps a huge residual visible if the forest misses it.
+    """
+    gate = np.asarray(flagged_if, dtype=bool) & (max_abs_z(z[Z_COLUMNS]) >= cfg.min_gate_z)
+    extreme = max_abs_z(z[Z_COLUMNS]) >= cfg.extreme_z
+    return gate | extreme
+
+
+def point_reason(
+    z_row: np.ndarray,
+    signal_row: np.ndarray,
+    if_score: float,
+    kpi_row: np.ndarray,
+    expected_row: np.ndarray,
+    kind: str = "",
+) -> str:
+    """Human-readable reason for one flagged bucket (empty string for normal buckets).
+
+    Names the residual that defines the bucket's direction - attempts for a volume_surge
+    (the direction_labels rule), conversion/revenue for a kpi_drop, otherwise the largest
+    |signal| - plus its MAD-scaled z, the IF score and the signed gap to the seasonal
+    expectation, e.g. "residual -7.2 MAD in conversion_rate, IF score 0.31,
+    conversion_rate 12% below seasonal expectation".
+    """
+    if not np.isfinite(signal_row).all() or len(KPI_COLUMNS) != len(signal_row):
+        return ""
+    if kind == "volume_surge":
+        best = KPI_COLUMNS.index("attempts")
+    elif kind == "kpi_drop":
+        drops = [KPI_COLUMNS.index(k) for k in ("conversion_rate", "revenue")]
+        best = max(drops, key=lambda j: -signal_row[j])
+    else:
+        best = int(np.argmax(np.abs(signal_row)))
+    if signal_row[best] == 0 and z_row[best] == 0:
+        return ""
+    kpi = KPI_COLUMNS[best]
+    gap = kpi_row[best] - expected_row[best]
+    if expected_row[best] != 0 and np.isfinite(expected_row[best]):
+        deviation = f"{kpi} {gap / expected_row[best] * 100.0:+.0f}% vs seasonal expectation"
+    elif gap < 0:
+        deviation = f"{kpi} below seasonal expectation by {gap:+.4g}"
+    else:
+        deviation = f"{kpi} above seasonal expectation by {gap:+.4g}"
+    return f"residual {z_row[best]:+.1f} MAD in {kpi}, IF score {if_score:.2f}, {deviation}"
 
 
 def direction_signals(z: pd.DataFrame, rolling_window: int) -> pd.DataFrame:
@@ -307,6 +481,16 @@ def make_window(
     end = scores.index[span.last] + step
     observed, expected = window_kpis(scores, start, end)
     if_score_min = float(scores["if_score"].iloc[span.first : span.last + 1].min())
+    peak_score = float(scores["anomaly_score"].iloc[span.first : span.last + 1].max())
+    peak_pos = int(scores["anomaly_score"].iloc[span.first : span.last + 1].to_numpy().argmax()) + span.first
+    reason = ""
+    if "reason" in scores.columns:
+        reason = str(scores["reason"].iloc[peak_pos])
+    drop_pct = None
+    primary = "attempts" if span.kind == "volume_surge" else "conversion_rate"
+    exp = expected[primary]
+    if np.isfinite(exp) and exp != 0 and np.isfinite(observed[primary]):
+        drop_pct = (exp - observed[primary]) / exp  # negative when the KPI moved the other way
     return AnomalyWindow(
         window_id=window_id,
         start=start.to_pydatetime(),
@@ -317,6 +501,10 @@ def make_window(
         observed=observed,
         expected=expected,
         detected_at=detected_at,
+        duration_hours=(end - start).total_seconds() / 3600.0,
+        peak_anomaly_score=max(peak_score, 0.0) if np.isfinite(peak_score) else 0.0,
+        drop_pct=drop_pct if drop_pct is not None and np.isfinite(drop_pct) else None,
+        reason=reason,
     )
 
 
@@ -324,23 +512,54 @@ def make_window(
 
 
 def detect_anomalies(kpis: pd.DataFrame, cfg: DetectionConfig) -> DetectionResult:
-    """Score every bucket and group flagged buckets into AnomalyWindows (batch mode)."""
+    """Score every bucket and group flagged buckets into AnomalyWindows (batch mode).
+
+    A raw KPI frame is cleaned first by :func:`kpi_rca.detection.kpi.preprocess_kpis`
+    (sorted index, duplicate buckets merged, missing rate values interpolated and
+    flagged); then the decomposition + Isolation Forest + the documented combination
+    rule in :func:`combine_signals` decide the flags.
+    """
+    kpis = preprocess_kpis(kpis)
     _check_kpis(kpis)
     expected = expected_kpis(kpis, cfg)
     z = residual_zscores(kpis, expected)
     features = if_features(z, cfg.rolling_window)
     forest = fit_isolation_forest(features, cfg)
     if_score = forest.decision_function(features)
-    flagged = forest.predict(features) == -1
+    flagged = combine_signals(forest.predict(features) == -1, z, cfg)
 
+    signals = direction_signals(z, cfg.rolling_window)
     scores = kpis.copy()
     for kpi in KPI_COLUMNS:
         scores[f"{kpi}_expected"] = expected[f"{kpi}_expected"]
         scores[f"{kpi}_resid_z"] = z[f"{kpi}_resid_z"]
     scores["if_score"] = if_score.astype(float)
+    scores["anomaly_score"] = (-np.asarray(if_score, dtype=float)).astype(float)  # higher = more anomalous
     scores["is_anomaly"] = flagged
-    scores["label"] = direction_labels(direction_signals(z, cfg.rolling_window), flagged)
+    scores["label"] = direction_labels(signals, flagged)
+    # schema compatibility
+    scores["direction"] = scores["label"]
     scores.index.name = "bucket"
+    # add timestamp alias
+    scores["timestamp"] = scores.index
+    scores["reason"] = [
+        point_reason(
+            z[Z_COLUMNS].to_numpy(dtype=float)[i],
+            signals[Z_COLUMNS].to_numpy(dtype=float)[i],
+            float(if_score[i]),
+            kpis[list(KPI_COLUMNS)].to_numpy(dtype=float)[i],
+            expected[EXPECTED_COLUMNS].to_numpy(dtype=float)[i],
+            kind=str(scores["label"].iloc[i]),
+        )
+        if flagged[i]
+        else ""
+        for i in range(len(scores))
+    ]  # flagged buckets explain themselves (empty for normal buckets)
+    # add kpi_value/expected_value aliases (primary KPI or conversion_rate as default)
+    scores["kpi_value"] = scores["conversion_rate"] if "conversion_rate" in scores.columns else scores.get(KPI_COLUMNS[0])
+    scores["expected_value"] = scores["conversion_rate_expected"] if "conversion_rate_expected" in scores.columns else scores.get(f"{KPI_COLUMNS[0]}_expected")
+    if "metadata" not in scores.columns:
+        scores["metadata"] = [{} for _ in range(len(scores))]
 
     spans = group_windows(scores["label"].to_numpy(), cfg.gap_tolerance, cfg.min_window_buckets)
     windows = [make_window(f"W-{n:03d}", scores, span, cfg.freq) for n, span in enumerate(spans, start=1)]
@@ -359,8 +578,60 @@ def detect_anomalies(kpis: pd.DataFrame, cfg: DetectionConfig) -> DetectionResul
 def _check_kpis(kpis: pd.DataFrame) -> None:
     missing = [c for c in ("attempts", "successes", "conversion_rate", "revenue") if c not in kpis.columns]
     if missing:
-        raise ValueError(f"KPI frame is missing columns {missing}")
+        raise InvalidKPIError(f"KPI frame is missing columns {missing}")
     if not isinstance(kpis.index, pd.DatetimeIndex) or not kpis.index.is_monotonic_increasing:
-        raise ValueError("KPI frame needs a sorted DatetimeIndex (use aggregate_kpis)")
-    if kpis[["conversion_rate", "revenue", "attempts"]].isna().any().any():
-        raise ValueError("KPI frame has missing values (use aggregate_kpis, which fills empty buckets)")
+        raise InvalidKPIError("KPI frame needs a sorted DatetimeIndex (use aggregate_kpis)")
+    if kpis.index.has_duplicates:
+        raise InvalidKPIError(
+            "KPI frame has duplicate bucket timestamps; batch detection merges them "
+            "(preprocess_kpis: counts/revenue summed, latency averaged, conversion recomputed), "
+            "streaming needs unique buckets - use aggregate_kpis"
+        )
+    values = kpis[["conversion_rate", "revenue", "attempts"]].to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        bad = [c for c in ("conversion_rate", "revenue", "attempts") if not np.isfinite(kpis[c].to_numpy(dtype=float)).all()]
+        raise InvalidKPIError(
+            f"KPI frame has NaN or infinite values in {bad}; use aggregate_kpis or preprocess_kpis, "
+            "which interpolate and mark imputed buckets"
+        )
+    negative = [
+        c for c in ("attempts", "successes", "failures", "revenue") if c in kpis.columns and (kpis[c].to_numpy(dtype=float) < 0).any()
+    ]
+    if negative:
+        raise InvalidKPIError(f"KPI frame has negative values in {negative} (counts and revenue must be >= 0)")
+    conversion = kpis["conversion_rate"].to_numpy(dtype=float)
+    outside = (conversion < 0) | (conversion > 1)
+    if outside.any():
+        raise InvalidKPIError(
+            f"KPI frame has {int(outside.sum())} conversion_rate values outside [0, 1], "
+            f"e.g. {float(conversion[outside][0]):.4g} at {kpis.index[outside][0]}"
+        )
+
+
+
+def robust_stl_decompose(values, cfg=None, period=None, allow_weekly=False, index=None):
+    from kpi_rca.config import DetectionConfig as _DC
+    if cfg is None:
+        cfg = _DC()
+    if period is not None:
+        cfg = cfg.model_copy(update={"period": int(period)})
+    _check_series(values)
+    arr = np.asarray(values, dtype=float).ravel()
+    p = resolve_period(cfg, index=index, allow_weekly=allow_weekly)
+    cfg2 = cfg.model_copy(update={"period": int(p)}) if p != cfg.period else cfg
+    n = arr.shape[0]
+    if n < 2 * cfg2.period + 1:
+        raise InsufficientDataError(f"need at least {2 * cfg2.period + 1} buckets (two full seasonal periods of {cfg2.period} buckets) for STL, got {n}; collect more history or lower detection.period")
+    if uses_mstl(n, cfg2):
+        result = MSTL(values, periods=(cfg2.period, cfg2.weekly_period), windows=(cfg2.stl_seasonal, WEEKLY_SEASONAL_WINDOW), stl_kwargs={"robust": True, "seasonal_deg": 0}).fit()
+        seasonal = np.asarray(result.seasonal, dtype=float)
+        if seasonal.ndim == 2:
+            seasonal = seasonal.sum(axis=1)
+    else:
+        result = STL(values, period=cfg2.period, seasonal=cfg2.stl_seasonal, trend=stl_trend_window(cfg2), robust=True).fit()
+        seasonal = np.asarray(result.seasonal, dtype=float)
+    trend = np.asarray(result.trend, dtype=float)
+    seasonal = np.asarray(seasonal, dtype=float)
+    expected_value = trend + seasonal
+    residual = arr - expected_value
+    return {"trend": trend, "seasonal": seasonal, "resid": residual, "residual": residual, "expected_value": expected_value, "expected": expected_value}

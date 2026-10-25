@@ -8,8 +8,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from kpi_rca.config import BACKGROUND_TICKET_THEMES, INCIDENT_TICKET_THEMES, config_from_dict
+from kpi_rca.config import BACKGROUND_TICKET_THEMES, INCIDENT_TICKET_THEMES, AppConfig, config_from_dict
 from kpi_rca.data import generate_scenario, load_scenario, save_scenario, validate_tickets, validate_transactions
+from kpi_rca.data.ecom_kaggle import (
+    InsufficientEcomDataError,
+    InvalidEcomDataError,
+    KaggleEcomLoader,
+    build_kpi_frame_for_pipeline,
+    load_kaggle_ecom_hourly,
+    validate_ecom_kpis,
+)
 from kpi_rca.data.generator import _BACKGROUND_CORE, _INCIDENT_CORE, TICKET_COLUMNS, TRANSACTION_COLUMNS
 
 from conftest import small_overrides
@@ -290,3 +298,248 @@ def test_validate_tickets(tk_sample):
     assert "gt_incident_id" not in no_gt.columns
     empty = validate_tickets(tk_sample.iloc[:0])
     assert empty.empty and list(empty.columns) == TICKET_COLUMNS
+
+
+# ------------------------------------------- injected anomaly controllability
+
+
+def _single_incident_cfg(failure_rate: float, duration_hours: float = 4.0) -> AppConfig:
+    """A tiny sealed scenario whose only injected anomaly is one DE failure incident."""
+    return config_from_dict(
+        {
+            "seed": 3,
+            "data": {
+                "days": 4,
+                "attempts_per_hour": 300,
+                "incidents": [
+                    {
+                        "incident_id": "INC-CTL",
+                        "segment": {"country": "DE"},
+                        "start": "2026-09-02 10:00",
+                        "duration_hours": duration_hours,
+                        "failure_rate": failure_rate,
+                        "error_code": "PAYPAL_SDK_TIMEOUT",
+                    }
+                ],
+                "benign_events": [],
+                "tickets": {"background_per_hour": 0.5},
+            },
+        },
+        source="tests/test_data.py",
+    )
+
+
+def _incident_outcome(cfg) -> tuple[float, int]:
+    """(success rate of the DE segment inside the incident window, forced-failure count)."""
+    scenario = generate_scenario(cfg.data, cfg.seed)
+    tx = scenario.transactions
+    [inc] = scenario.ground_truth.incidents
+    inside = (tx["timestamp"] >= inc.start) & (tx["timestamp"] < inc.end) & (tx["country"] == "DE")
+    return float(1 - tx.loc[inside, "success"].mean()), inc.forced_failures
+
+
+def test_injected_drop_magnitude_is_controllable():
+    strong = _incident_outcome(_single_incident_cfg(failure_rate=0.9))
+    weak = _incident_outcome(_single_incident_cfg(failure_rate=0.3))
+    assert strong[1] > weak[1] > 0  # ground truth carries the injected counts
+    # the stronger incident costs the segment more successes, with margin both ways
+    assert strong[0] > 0.5 and weak[0] < strong[0] - 0.3
+
+
+def test_injected_drop_duration_is_controllable():
+    short = generate_scenario(_single_incident_cfg(0.9, duration_hours=2).data, 3)
+    long = generate_scenario(_single_incident_cfg(0.9, duration_hours=6).data, 3)
+    for scenario, hours in ((short, 2), (long, 6)):
+        tx = scenario.transactions
+        [inc] = scenario.ground_truth.incidents
+        coded = tx["error_code"] == inc.error_code
+        affected = (tx["timestamp"] >= inc.start) & (tx["timestamp"] < inc.end + timedelta(hours=1))
+        assert inc.forced_failures > 0
+        assert coded.sum() == inc.forced_failures
+        assert (tx.loc[coded, "timestamp"] < inc.start + timedelta(hours=hours)).all()
+        assert affected[coded].all()  # every forced failure lies inside the injected window
+
+
+def test_injected_anomalies_are_seeded():
+    first, second = (
+        _incident_outcome(_single_incident_cfg(failure_rate=0.9)),
+        _incident_outcome(_single_incident_cfg(failure_rate=0.9)),
+    )
+    assert first == second  # same seed -> identical ground truth down to the counts
+
+
+# ----------------------------------- Kaggle eCommerce CSV (chunked, tiny fixture)
+
+ECOM_COLUMNS = [
+    "event_time",
+    "event_type",
+    "product_id",
+    "category_id",
+    "category_code",
+    "brand",
+    "price",
+    "user_id",
+    "user_session",
+]
+
+
+def _ecom_rows() -> list[tuple]:
+    """Five hours with a duplicate pair, a cross-chunk session, nulls and one missing hour."""
+    return [
+        ("2019-11-01 00:00:00 UTC", "view", "100", "1", "electronics.smartphone", "xiaomi", 100.0, "u1", "s1"),
+        ("2019-11-01 00:00:00 UTC", "purchase", "100", "1", "electronics.smartphone", "xiaomi", 100.0, "u1", "s1"),
+        # exact duplicate of the purchase above (same chunk at chunksize=3)
+        ("2019-11-01 00:00:00 UTC", "purchase", "100", "1", "electronics.smartphone", "xiaomi", 100.0, "u1", "s1"),
+        # same session as rows 0-2 but in the next chunk: must not inflate the hourly session count
+        ("2019-11-01 00:00:00 UTC", "view", "100", "1", "electronics.smartphone", "xiaomi", 100.0, "u1", "s1"),
+        ("2019-11-01 00:00:00 UTC", "cart", "200", "2", "electronics.laptop", "lenovo", 300.0, "u2", "s2"),
+        ("2019-11-01 01:00:00 UTC", "purchase", "200", "2", "electronics.laptop", "lenovo", 300.0, "u2", "s2"),
+        ("2019-11-01 01:00:00 UTC", "view", "300", "3", "appliances.sewing_machine", "janome", 50.0, "u3", "s3"),
+        # 02:00 is absent -> imputed hour
+        ("2019-11-01 03:00:00 UTC", "view", "400", "4", "", "", 10.0, "u4", "s4"),
+        ("2019-11-01 03:00:00 UTC", "purchase", "400", "4", "", "", 10.0, "u4", "s4"),
+        ("2019-11-01 04:00:00 UTC", "view", "500", "5", "electronics.smartphone", "otherbrand", 20.0, "u5", "s5"),
+        ("2019-11-01 04:00:00 UTC", "view", "500", "5", "electronics.smartphone", "otherbrand", 20.0, "u5", "s5"),
+    ]
+
+
+def _write_ecom_csv(tmp_path, rows: list[tuple], name: str = "ecom.csv") -> "Path":
+    path = tmp_path / name
+    pd.DataFrame(rows, columns=ECOM_COLUMNS).to_csv(path, index=False)
+    return path
+
+
+def _load_fixture(tmp_path, *, chunksize: int = 3, cache_dir=None):
+    csv = _write_ecom_csv(tmp_path, _ecom_rows())
+    return KaggleEcomLoader(csv, cache_dir=cache_dir, chunksize=chunksize, top_brands=2).load()
+
+
+def test_ecom_chunked_hourly_aggregation_is_exact(tmp_path):
+    dataset = _load_fixture(tmp_path)
+    hourly = dataset.hourly
+    assert isinstance(hourly.index, pd.DatetimeIndex) and hourly.index.tz is None
+    assert hourly.index.name == "hour"
+    assert len(hourly) == 5
+    assert hourly.index.tolist() == list(pd.date_range("2019-11-01 00:00", periods=5, freq="h"))
+
+    h00 = hourly.loc["2019-11-01 00:00"]
+    assert (h00["sessions"], h00["purchases"], h00["purchase_events"], h00["carts"]) == (2, 1, 1, 1)
+    assert h00["revenue"] == 100.0
+    assert h00["conversion_rate"] == 0.5 and h00["cart_rate"] == 0.5
+
+    h01 = hourly.loc["2019-11-01 01:00"]
+    assert (h01["sessions"], h01["purchases"], h01["carts"], h01["revenue"]) == (2, 1, 0, 300.0)
+    assert h01["conversion_rate"] == 0.5 and h01["cart_rate"] == 0.0
+
+    h04 = hourly.loc["2019-11-01 04:00"]
+    assert (h04["sessions"], h04["purchases"], h04["purchase_events"]) == (1, 0, 0)
+
+
+def test_ecom_missing_hour_is_imputed_and_reported(tmp_path):
+    dataset = _load_fixture(tmp_path)
+    missing = pd.Timestamp("2019-11-01 02:00")
+    assert dataset.hourly.loc[missing, "imputed"]
+    assert dataset.hourly.loc[missing, "sessions"] == 0
+    assert dataset.hourly.loc[missing, "purchases"] == 0
+    assert np.isfinite(dataset.hourly.loc[missing, "conversion_rate"])  # interpolated, not NaN
+    observed = dataset.hourly.drop(index=missing)
+    assert not observed["imputed"].any()
+    assert dataset.gaps == [{"start": "2019-11-01T02:00:00", "end": "2019-11-01T03:00:00", "hours": 1}]
+
+
+def test_ecom_null_category_and_brand_become_unknown(tmp_path):
+    dataset = _load_fixture(tmp_path)
+    h03 = dataset.segments[(dataset.segments["hour"] == pd.Timestamp("2019-11-01 03:00"))]
+    category = h03[(h03["attribute"] == "category") & (h03["value"] == "unknown")].iloc[0]
+    brand = h03[(h03["attribute"] == "brand") & (h03["value"] == "unknown")].iloc[0]
+    assert (category["sessions"], category["purchases"], category["revenue"]) == (1, 1, 10.0)
+    assert (brand["sessions"], brand["purchases"], brand["revenue"]) == (1, 1, 10.0)
+
+
+def test_ecom_top_brands_plus_other(tmp_path):
+    dataset = _load_fixture(tmp_path)
+    assert set(dataset.top_brands) == {"xiaomi", "lenovo"}  # top-2 by raw event count
+    brands = set(dataset.segments.loc[dataset.segments["attribute"] == "brand", "value"])
+    assert brands == {"xiaomi", "lenovo", "unknown", "other"}
+    other_h01 = dataset.segments[
+        (dataset.segments["attribute"] == "brand")
+        & (dataset.segments["value"] == "other")
+        & (dataset.segments["hour"] == pd.Timestamp("2019-11-01 01:00"))
+    ].iloc[0]
+    assert other_h01["sessions"] == 1  # janome, outside the top-2, folded into "other"
+
+
+def test_ecom_cache_roundtrip(tmp_path):
+    cache = tmp_path / "processed"
+    csv = _write_ecom_csv(tmp_path, _ecom_rows())
+    first = KaggleEcomLoader(csv, cache_dir=cache, chunksize=3, top_brands=2).load()
+    assert first.cache_paths and all(path.is_file() for path in first.cache_paths.values())
+    second = KaggleEcomLoader(csv, cache_dir=cache, chunksize=3, top_brands=2).load()
+    pd.testing.assert_frame_equal(first.hourly, second.hourly)
+    pd.testing.assert_frame_equal(first.segments, second.segments)
+    assert first.gaps == second.gaps
+
+
+@pytest.mark.parametrize(
+    ("row", "message"),
+    [
+        (("2019-11-01 00:00:00 UTC", "purchase", "1", "1", "electronics", "x", -5.0, "u", "s"), "negative"),
+        (("2019-11-01 00:00:00 UTC", "refund", "1", "1", "electronics", "x", 5.0, "u", "s"), "event_type"),
+        (("not-a-timestamp", "view", "1", "1", "electronics", "x", 5.0, "u", "s"), "timestamps"),
+        (("2019-11-01 00:00:00 UTC", "purchase", "1", "1", "electronics", "x", "", "u", "s"), "price"),
+    ],
+)
+def test_ecom_invalid_rows_raise_typed_errors(tmp_path, row, message):
+    csv = _write_ecom_csv(tmp_path, [row])
+    with pytest.raises(InvalidEcomDataError, match=message):
+        KaggleEcomLoader(csv, cache_dir=None, chunksize=2).load()
+
+
+def test_ecom_validation_rejects_short_and_gapped_frames():
+    index = pd.date_range("2019-11-01", periods=10, freq="h", name="hour")
+    frame = pd.DataFrame(
+        {
+            "sessions": np.full(10, 10),
+            "purchases": np.full(10, 2),
+            "conversion_rate": np.full(10, 0.2),
+            "cart_rate": np.full(10, 0.3),
+            "revenue": np.full(10, 100.0),
+            "imputed": False,
+        },
+        index=index,
+    )
+    with pytest.raises(InsufficientEcomDataError, match="two full seasonal periods"):
+        validate_ecom_kpis(frame, period=24)
+    with pytest.raises(InvalidEcomDataError, match="regular"):
+        validate_ecom_kpis(frame.drop(index=index[4]), period=2)
+    bad = frame.copy()
+    bad.loc[index[0], "purchases"] = 11
+    with pytest.raises(InvalidEcomDataError, match="purchases greater than sessions"):
+        validate_ecom_kpis(bad, period=2)
+    assert validate_ecom_kpis(frame, period=2).index.name == "hour"
+
+
+def test_ecom_maps_to_pipeline_kpi_columns(tmp_path):
+    csv = _write_ecom_csv(tmp_path, _ecom_rows())
+    hourly = load_kaggle_ecom_hourly(csv, cache_dir=None, chunksize=3, top_brands=2, period=2)
+    kpi = build_kpi_frame_for_pipeline(hourly, period=2)
+    assert list(kpi.columns) == [
+        "attempts",
+        "successes",
+        "failures",
+        "conversion_rate",
+        "revenue",
+        "cart_rate",
+        "imputed",
+    ]
+    assert kpi.index.name == "bucket"
+    h00 = kpi.loc["2019-11-01 00:00"]
+    assert (h00["attempts"], h00["successes"], h00["failures"]) == (2, 1, 1)
+    assert h00["revenue"] == 100.0
+
+    from kpi_rca.detection.kpi import preprocess_kpis
+
+    clean = preprocess_kpis(kpi)  # the detection stage accepts the mapped frame unchanged
+    assert len(clean) == len(kpi) and clean["imputed"].sum() == 1
+    assert (clean["attempts"] >= clean["successes"]).all()
+

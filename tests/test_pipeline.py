@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 
+import pandas as pd
 import pytest
 
 from kpi_rca import pipeline
+from kpi_rca.data.generator import TRANSACTION_COLUMNS
+from kpi_rca.detection import aggregate_kpis, detect_anomalies
 from kpi_rca.pipeline import incident_id_for, run_pipeline
 from kpi_rca.reporting.llm import TemplateNarrator
 from kpi_rca.schemas import RCAResult
@@ -129,3 +132,59 @@ def test_forced_claude_without_credentials_fails_before_any_work(offline_cfg, sm
 def test_missing_data_directory_raises(offline_cfg, tmp_path):
     with pytest.raises(ValueError, match="not found"):
         run_pipeline(offline_cfg, tmp_path / "nope", tmp_path / "out")
+
+
+def test_aggregated_detection_windows_reach_rca_with_expected_input(
+    offline_cfg, small_scenario, tmp_path, monkeypatch
+):
+    """aggregate -> detect -> windows -> pipeline: RCA still gets the right frame and windows."""
+    kpis = aggregate_kpis(small_scenario.transactions, offline_cfg.detection.freq)
+    externally_detected = detect_anomalies(kpis, offline_cfg.detection)
+    expected_drops = [w for w in externally_detected.windows if w.kpi_type == "kpi_drop"]
+    assert expected_drops
+
+    calls = []
+
+    def spy(transactions, window, cfg, use_offset=True, *, exclude_windows=()):
+        calls.append((transactions, window, cfg, list(exclude_windows)))
+        assert isinstance(transactions, pd.DataFrame)
+        assert set(TRANSACTION_COLUMNS) <= set(transactions.columns)
+        rows = transactions[(transactions["timestamp"] >= window.start) & (transactions["timestamp"] < window.end)]
+        assert not rows.empty, f"RCA received no transactions for {window.window_id}"
+        assert cfg is offline_cfg.rca
+        return RCAResult(
+            window_id=window.window_id,
+            findings=[],
+            feature_importance={},
+            top_interactions=[],
+            slices_evaluated=0,
+            runtime_s=0.0,
+        )
+
+    monkeypatch.setattr(pipeline, "analyze_window", spy)
+    result = run_pipeline(offline_cfg, small_scenario, tmp_path)
+
+    assert [w.window_id for _, w, _, _ in calls] == [w.window_id for w in expected_drops]
+    for (_, window, _, excluded), expected in zip(calls, expected_drops):
+        assert (window.start, window.end, window.kpi_type) == (
+            expected.start,
+            expected.end,
+            expected.kpi_type,
+        )
+        assert [w.window_id for w in excluded] == [w.window_id for w in externally_detected.windows]
+    assert [o.window.window_id for o in result.windows if o.window.kpi_type == "kpi_drop"] == [
+        w.window_id for w in expected_drops
+    ]
+
+
+def test_windows_carry_detection_summary_fields(summary):
+    """Duration, peak score, reason and drop% flow from detection through to the reports."""
+    for outcome in summary.windows:
+        w = outcome.window
+        assert w.duration_hours == w.n_buckets
+        assert w.peak_anomaly_score > 0
+        assert w.reason != ""
+    reported = summary.reports
+    assert reported and all(o.window.reason != "" for o in reported)
+    incident = [o for o in reported if o.top_segment == INCIDENT]
+    assert incident and incident[0].window.drop_pct is not None and incident[0].window.drop_pct > 0

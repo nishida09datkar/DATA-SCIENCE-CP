@@ -4,6 +4,7 @@
     run       the full pipeline on a data directory; prints every memo
     stream    replay the KPIs bucket by bucket; prints alerts and the delay per known incident
     evaluate  the randomised benchmark (PLAN section 5); writes outputs/evaluation/
+    demo      detect on real hourly KPIs, print windows and save a plot to outputs/demo/
 
 Every command returns an exit code instead of raising: 0 = success, 2 = a problem with
 the input (bad config, missing data directory, Claude requested without credentials).
@@ -82,6 +83,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=None, help="override evaluation.seed")
     p.add_argument("--stream", choices=["full", "incidents", "off"], default=None, help="override evaluation.stream_mode")
     p.add_argument("--with-llm", action="store_true", help="also run ablation A4 with Claude (costs money)")
+
+    p = commands.add_parser("demo", help="detect on real hourly KPIs, print the windows and save a plot")
+    add_config(p)
+    p.add_argument(
+        "--input",
+        nargs="+",
+        type=Path,
+        default=None,
+        help="raw eCommerce CSV(s)/directory or one aggregated hourly KPI table; default: the cached "
+        "data/processed/ecom_hourly_*.parquet",
+    )
+    p.add_argument("--out-dir", "--out", dest="out_dir", type=Path, default=Path("outputs/demo"))
+    p.add_argument("--period", type=int, default=None, help="seasonal period in buckets (default detection.period)")
+    p.add_argument("--seed", type=int, default=None, help="seed for the optional injected evaluation")
+    p.add_argument(
+        "--evaluate-injected",
+        action="store_true",
+        help="also score precision/recall on seeded anomalies injected into a copy of the real series",
+    )
+    p.add_argument("--inject-drops", type=int, default=4, help="injected conversion drops (default 4)")
+    p.add_argument("--inject-spikes", type=int, default=3, help="injected traffic spikes (default 3)")
     return parser
 
 
@@ -97,7 +119,13 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         return fail(str(exc))
 
-    handlers = {"generate": cmd_generate, "run": cmd_run, "stream": cmd_stream, "evaluate": cmd_evaluate}
+    handlers = {
+        "generate": cmd_generate,
+        "run": cmd_run,
+        "stream": cmd_stream,
+        "evaluate": cmd_evaluate,
+        "demo": cmd_demo,
+    }
     return handlers[args.command](args, cfg)
 
 
@@ -221,3 +249,77 @@ def cmd_evaluate(args: argparse.Namespace, cfg: AppConfig) -> int:
     echo(result.summary_markdown)
     echo(f"written: {', '.join(str(p) for p in result.paths.values())}")
     return EXIT_OK
+
+
+def cmd_demo(args: argparse.Namespace, cfg: AppConfig) -> int:
+    from kpi_rca.demo import run_demo
+
+    inputs = args.input
+    if inputs is None:
+        cached = sorted(Path("data/processed").glob("ecom_hourly_*.parquet"))
+        if not cached:
+            return fail(
+                "no --input given and no cached ecom_hourly_*.parquet in data/processed; pass the raw "
+                "Kaggle CSV files or an aggregated hourly KPI table"
+            )
+        if len(cached) > 1:
+            return fail(f"several cached KPI tables found; pass one with --input: {[str(p) for p in cached]}")
+        inputs = cached
+
+    try:
+        result = run_demo(
+            inputs,
+            args.out_dir,
+            cfg,
+            period=args.period,
+            evaluate_injected_anomalies=args.evaluate_injected,
+            seed=args.seed,
+            n_drops=args.inject_drops,
+            n_spikes=args.inject_spikes,
+        )
+    except ValueError as exc:
+        return fail(str(exc))
+
+    d = result.descriptive
+    echo(
+        f"{d['n_buckets']} hourly buckets, {d['first_bucket']} -> {d['last_bucket']}: "
+        f"{d['n_windows']} window(s) ({d['n_kpi_drop']} kpi_drop, {d['n_volume_surge']} volume_surge)"
+    )
+    echo(f"  kpi_drop hours: {d['kpi_drop_hours']:.0f}; volume_surge hours: {d['volume_surge_hours']:.0f}")
+    for w in d["windows"]:
+        drop = "" if w["drop_pct"] is None else f"  drop {w['drop_pct'] * 100:.0f}%"
+        echo(
+            f"  {w['window_id']} {w['kpi_type']:<12} {w['start']} -> {w['end']}  "
+            f"{w['n_buckets']} bucket(s){drop}"
+        )
+    echo(f"  note: {d['note']}")
+
+    if result.injected is not None:
+        i = result.injected
+        echo("")
+        echo(f"injected evaluation (seeded, label '{i['label']}', seed {i['seed']}):")
+        echo(
+            f"  injected: {i['n_injected']['total']} ({i['n_injected']['drop']} drops, "
+            f"{i['n_injected']['spike']} spikes); detected windows: {i['true_positives'] + i['false_positives']}"
+        )
+        echo(
+            f"  precision {_fmt_metric(i['precision'])}, recall {_fmt_metric(i['recall'])}, "
+            f"F1 {_fmt_metric(i['f1'])} (TP {i['true_positives']}, FP {i['false_positives']}, "
+            f"FN {i['false_negatives']})"
+        )
+        for kind, s in i["by_kind"].items():
+            echo(
+                f"  {kind:<5} precision {_fmt_metric(s['precision'])}, recall {_fmt_metric(s['recall'])}, "
+                f"n {s['n_injected']}"
+            )
+        echo(f"  note: {i['note']}")
+
+    echo("")
+    echo(f"plot: {result.plot_path}")
+    echo(f"windows: {result.windows_path}")
+    echo(f"summary: {result.summary_path}")
+    return EXIT_OK
+
+
+def _fmt_metric(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}"

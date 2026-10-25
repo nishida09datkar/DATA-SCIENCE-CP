@@ -31,6 +31,14 @@ class AnomalyWindow(BaseModel):
     observed: dict[str, float]  # keys = KPI_COLUMNS; conversion = sum(successes)/sum(attempts); others = sums
     expected: dict[str, float]  # same keys, from STL trend+seasonal (expected conversion weighted by attempts)
     detected_at: datetime | None = None  # set by the streaming replay; None in batch mode
+    # Additive summary fields (v1.1): defaults keep old constructors valid.
+    duration_hours: float = 0.0  # end - start in hours (n_buckets in bucket-size units)
+    peak_anomaly_score: float = 0.0  # max anomaly_score in the window (higher = more anomalous)
+    # Signed expected-vs-observed gap of the primary KPI: (expected - observed)/expected of
+    # conversion_rate for kpi_drop (positive = the KPI fell), of attempts for volume_surge
+    # (positive = traffic rose). None when the expectation is 0 or not finite.
+    drop_pct: float | None = None
+    reason: str = ""  # human-readable reason of the window's peak bucket (see detection.detector.point_reason)
 
 
 class SegmentFinding(BaseModel):
@@ -98,6 +106,10 @@ class DetectionResult:
     # scores: index is a DatetimeIndex named "bucket" (hourly, sorted, gap-free). Columns:
     #   attempts, successes, failures, conversion_rate, revenue, avg_latency_ms (observed)
     #   {k}_expected and {k}_resid_z for k in KPI_COLUMNS
-    #   if_score (float); is_anomaly (bool); label ("normal" | "kpi_drop" | "volume_surge")
+    #   if_score (float, IsolationForest decision_function, lower = more anomalous)
+    #   anomaly_score (float, = -if_score, HIGHER = more anomalous; the streaming replay fills it too)
+    #   is_anomaly (bool); label ("normal" | "kpi_drop" | "volume_surge")
+    #   reason ("": empty for normal buckets; a human-readable detection reason for flagged ones)
+    #   imputed (bool, carried over from the raw KPI frame: buckets with interpolated rates)
     scores: pd.DataFrame
     windows: list[AnomalyWindow]

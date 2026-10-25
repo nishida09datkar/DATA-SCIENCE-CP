@@ -217,3 +217,5 @@ def validate_tickets(tickets: pd.DataFrame) -> pd.DataFrame:
     if not out["created_at"].is_monotonic_increasing:
         out = out.sort_values("created_at", kind="stable")
     return out.reset_index(drop=True)
+
+from kpi_rca.data.ecom_kaggle import load_kaggle_ecom_hourly, KaggleEcomLoader, build_kpi_frame_for_pipeline, validate_ecom_kpis  # noqa: F401
